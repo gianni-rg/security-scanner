@@ -1,0 +1,115 @@
+
+# =============================================================================
+# Security Scanner Compose
+# =============================================================================
+# Usage:
+#   # Build the image
+#   podman compose build
+#
+#   # Run all scans on current directory
+#   $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
+#
+#   # Run specific scan
+#   podman compose run --rm security-scanner gitleaks
+#   podman compose run --rm security-scanner semgrep
+#   podman compose run --rm security-scanner trivy
+#
+#   # Scan a specific directory
+#   $env:SCAN_PATH='D:/path/to/project'; $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
+#
+#   # Export results to a specific directory
+#   $env:OUTPUT_PATH='D:/path/to/output'; podman compose run --rm security-scanner
+# =============================================================================
+
+services:
+  security-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localhost/security-scanner:latest
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=1g
+      - /run:rw,noexec,nosuid,nodev,mode=755,size=16m
+
+    # Mount the directory to scan and output directory
+    volumes:
+      # Source code to scan (default: repository root)
+      - ${SCAN_PATH:-../..}:/workspace:ro
+      # Output directory for results
+      - ${OUTPUT_PATH:-./output}:/output
+      - trivy-cache:/var/lib/trivy
+
+    environment:
+      # Scanner configuration via environment variables
+      - SCAN_DIR=/workspace
+      - OUTPUT_DIR=/output
+      - SKIP_DIRS=${SKIP_DIRS:-node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods}
+      - FAIL_ON_SEVERITY=${FAIL_ON_SEVERITY:-CRITICAL,HIGH}
+      - ALLOW_ROOT_FALLBACK=${ALLOW_ROOT_FALLBACK:-false}
+      - CONFIG_FILE=/app/config.yml
+
+    # Run all scans by default
+    command: ${SCAN_COMMAND:-all}
+
+  # Individual scanner services for targeted scans
+  gitleaks:
+    extends:
+      service: security-scanner
+    command: gitleaks
+    depends_on: []
+
+  semgrep:
+    extends:
+      service: security-scanner
+    command: semgrep
+    depends_on: []
+
+  trivy:
+    extends:
+      service: security-scanner
+    command: trivy
+    depends_on: []
+
+  trivy-vuln:
+    extends:
+      service: security-scanner
+    command: trivy-vuln
+    depends_on: []
+
+  trivy-config:
+    extends:
+      service: security-scanner
+    command: trivy-config
+    depends_on: []
+
+  trivy-license:
+    extends:
+      service: security-scanner
+    command: trivy-license
+    depends_on: []
+
+  syft:
+    extends:
+      service: security-scanner
+    command: syft
+    depends_on: []
+
+  hadolint:
+    extends:
+      service: security-scanner
+    command: hadolint
+    depends_on: []
+
+volumes:
+  trivy-cache:
+    name: security-scanner-trivy-cache
+
+networks:
+  default:
+    name: security-scanner-network

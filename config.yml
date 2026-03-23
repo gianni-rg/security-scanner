@@ -1,0 +1,83 @@
+# =============================================================================
+# Security Scanner Configuration
+# =============================================================================
+# This file contains default configuration for the security scanner.
+# Environment variables can override these settings.
+# =============================================================================
+
+# General Settings
+general:
+  # Directories to skip during scanning
+  skip_dirs:
+    - node_modules
+    - vendor
+    - .terraform
+    - dist
+    - build
+    - target
+    - .venv
+    - venv
+    - __pycache__
+    - .gradle
+    - Pods
+    - .git
+    - legacy
+
+# Gitleaks Configuration
+gitleaks:
+  enabled: true
+  # Any secret found will fail the scan
+  fail_on_secrets: true
+
+# Semgrep Configuration
+semgrep:
+  enabled: true
+  # Rulesets to use
+  rulesets:
+    - p/security-audit
+    - p/secrets
+  # Minimum severity to fail (CRITICAL, HIGH, MEDIUM, LOW, NONE)
+  fail_on_severity: HIGH
+
+# Trivy Configuration
+trivy:
+  vulnerability:
+    enabled: true
+    # Maximum allowed vulnerabilities before failing
+    max_critical: 0
+    max_high: 0
+    # -1 means unlimited
+    max_medium: -1
+    max_low: -1
+
+  config:
+    enabled: true
+    # Fail on IaC misconfigurations
+    fail_on_critical: true
+    fail_on_high: true
+
+  license:
+    enabled: true
+    # Forbidden licenses (will fail if found)
+    forbidden_licenses:
+      - GPL-3.0
+      - AGPL-3.0
+
+# Syft Configuration
+syft:
+  enabled: true
+  # Output formats
+  formats:
+    - spdx-json
+    - cyclonedx-json
+
+# Hadolint Configuration
+hadolint:
+  enabled: true
+  # Fail on these rule levels
+  fail_on:
+    - error
+  # Rules to ignore (example)
+  ignored_rules: []
+    # - DL3008
+    # - DL3009

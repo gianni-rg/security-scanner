@@ -1,0 +1,5 @@
+*
+!.dockerignore
+!Dockerfile
+!config.yml
+!entrypoint.sh
