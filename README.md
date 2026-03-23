@@ -21,7 +21,9 @@ This is an opinionated repository that can be used to run security scans on your
 ### Build the image
 
 ```powershell
-podman compose build
+# Podman defaults to OCI image format, which ignores HEALTHCHECK.
+# Build in Docker format so the image keeps the declared health check.
+podman build --format docker -t localhost/security-scanner:latest .
 ```
 
 ### Run all scans
@@ -141,7 +143,7 @@ Use `podman compose` or `docker compose` as the default path when possible. In t
 
 ```powershell
 # Build
-podman build -t localhost/security-scanner .
+podman build --format docker -t localhost/security-scanner:latest .
 
 # Create the persistent Trivy cache volume once
 podman volume exists security-scanner-trivy-cache 2>$null
@@ -193,7 +195,7 @@ podman run --rm --init --read-only `
 
 ```powershell
 # Build
-docker build -t localhost/security-scanner .
+docker build -t localhost/security-scanner:latest .
 
 # Create the persistent Trivy cache volume once
 docker volume inspect security-scanner-trivy-cache *> $null

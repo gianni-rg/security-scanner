@@ -4,7 +4,9 @@
 # =============================================================================
 # Usage:
 #   # Build the image
-#   podman compose build
+#   # Podman defaults to OCI image format, which ignores HEALTHCHECK.
+#   # Build in Docker format so the image preserves the Dockerfile health check.
+#   podman build --format docker -t localhost/security-scanner:latest .
 #
 #   # Compose is the preferred path because it already applies the hardened
 #   # runtime settings used by this repository.
