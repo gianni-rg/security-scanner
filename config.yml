@@ -11,6 +11,8 @@ general:
   skip_dirs:
     - node_modules
     - vendor
+    - bin
+    - obj
     - .terraform
     - dist
     - build
@@ -41,6 +43,9 @@ semgrep:
 
 # Trivy Configuration
 trivy:
+  # Timeout passed to Trivy filesystem scans
+  timeout: 30m
+
   vulnerability:
     enabled: true
     # Maximum allowed vulnerabilities before failing

@@ -100,6 +100,7 @@ output/
 | `OUTPUT_PATH` | `./output` | Results directory |
 | `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude |
 | `FAIL_ON_SEVERITY` | `CRITICAL,HIGH` | Severity levels that cause failure |
+| `TRIVY_TIMEOUT` | `30m` | Timeout passed to each Trivy filesystem scan |
 | `ALLOW_ROOT_FALLBACK` | `false` | Explicitly allow root execution if the runtime cannot drop privileges |
 | `FORBIDDEN_LICENSES` | `GPL-3.0,AGPL-3.0` | License identifiers that fail the scan |
 | `HADOLINT_FAIL_ON` | `error` | Hadolint levels that fail the scan |
@@ -110,8 +111,9 @@ output/
 ```powershell
 $env:SCAN_PATH='D:/path/to/your/project'
 $env:OUTPUT_PATH='D:/path/to/your/reports'
-$env:SKIP_DIRS='node_modules,dist,build'
+$env:SKIP_DIRS='node_modules,dist,build,bin,obj'
 $env:FAIL_ON_SEVERITY='CRITICAL'
+$env:TRIVY_TIMEOUT='60m'
 $env:ALLOW_ROOT_FALLBACK='true'
 $env:FORBIDDEN_LICENSES='GPL-3.0,AGPL-3.0'
 podman compose run --rm security-scanner
@@ -124,6 +126,8 @@ The scanner container runs with stricter defaults:
 - all Linux capabilities dropped
 - `no-new-privileges` enabled
 - writable state isolated to hardened tmpfs paths, the Trivy cache volume, and the explicit output bind mount
+
+If Trivy times out on large repositories, exclude generated output first, especially `.NET` build folders like `bin` and `obj`. Increase `TRIVY_TIMEOUT` only when source-relevant paths still need more time to analyze.
 
 On runtimes that do not permit in-container UID/GID switching (rootless containers), privilege drop fails closed by default. Set `$env:ALLOW_ROOT_FALLBACK=true` only when you explicitly accept root execution for that environment and start the container as root for that run, for example with `$env:ALLOW_ROOT_FALLBACK='true'; podman compose run --user 0:0 --rm security-scanner`.
 
@@ -159,8 +163,9 @@ podman run --rm --init --read-only `
   --mount $cacheMount `
   --env SCAN_DIR=/workspace `
   --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest all
@@ -176,8 +181,9 @@ podman run --rm --init --read-only `
   --mount $cacheMount `
   --env SCAN_DIR=/workspace `
   --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest gitleaks
@@ -208,8 +214,9 @@ docker run --rm --init --read-only `
   --mount $cacheMount `
   --env SCAN_DIR=/workspace `
   --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest all

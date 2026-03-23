@@ -145,6 +145,7 @@ DEFAULT_SKIP_DIRS="$(get_config_value general.skip_dirs)"
 DEFAULT_SEMGREP_RULESETS="$(get_config_value semgrep.rulesets)"
 DEFAULT_FAIL_THRESHOLD="$(get_config_value semgrep.fail_on_severity)"
 DEFAULT_FORBIDDEN_LICENSES="$(get_config_value trivy.license.forbidden_licenses)"
+DEFAULT_TRIVY_TIMEOUT="$(get_config_value trivy.timeout)"
 DEFAULT_HADOLINT_FAIL_ON="$(get_config_value hadolint.fail_on)"
 DEFAULT_HADOLINT_IGNORED_RULES="$(get_config_value hadolint.ignored_rules)"
 
@@ -152,6 +153,7 @@ SKIP_DIRS="${SKIP_DIRS:-${DEFAULT_SKIP_DIRS:-node_modules,vendor,.terraform,dist
 FAIL_ON_SEVERITY="${FAIL_ON_SEVERITY:-$(threshold_to_fail_list "${DEFAULT_FAIL_THRESHOLD:-HIGH}")}"
 SEMGREP_RULESETS="${SEMGREP_RULESETS:-${DEFAULT_SEMGREP_RULESETS:-auto,p/security-audit,p/secrets}}"
 FORBIDDEN_LICENSES="${FORBIDDEN_LICENSES:-${DEFAULT_FORBIDDEN_LICENSES:-GPL-3.0,AGPL-3.0}}"
+TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-${DEFAULT_TRIVY_TIMEOUT:-30m}}"
 HADOLINT_FAIL_ON="${HADOLINT_FAIL_ON:-${DEFAULT_HADOLINT_FAIL_ON:-error}}"
 HADOLINT_IGNORED_RULES="${HADOLINT_IGNORED_RULES:-${DEFAULT_HADOLINT_IGNORED_RULES:-}}"
 ALLOW_ROOT_FALLBACK="${ALLOW_ROOT_FALLBACK:-false}"
@@ -443,6 +445,7 @@ run_trivy_vuln() {
         --format json \
         --output "${output_file}" \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_json_exit=$?
 
@@ -452,6 +455,7 @@ run_trivy_vuln() {
         --format sarif \
         --output "${sarif_file}" \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_sarif_exit=$?
 
@@ -460,6 +464,7 @@ run_trivy_vuln() {
         --scanners vuln \
         --format table \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
 
@@ -519,6 +524,7 @@ run_trivy_config() {
         --format json \
         --output "${output_file}" \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_json_exit=$?
 
@@ -527,6 +533,7 @@ run_trivy_config() {
         --scanners misconfig \
         --format table \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
 
@@ -578,6 +585,7 @@ run_trivy_license() {
         --format json \
         --output "${output_file}" \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         . 2>&1 || trivy_json_exit=$?
 
     # Table output
@@ -585,6 +593,7 @@ run_trivy_license() {
         --scanners license \
         --format table \
         "${skip_args[@]}" \
+        --timeout "${TRIVY_TIMEOUT}" \
         . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then

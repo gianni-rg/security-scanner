@@ -61,8 +61,9 @@ services:
       # Scanner configuration via environment variables
       - SCAN_DIR=/workspace
       - OUTPUT_DIR=/output
-      - SKIP_DIRS=${SKIP_DIRS:-node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods}
+      - SKIP_DIRS=${SKIP_DIRS:-node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods}
       - FAIL_ON_SEVERITY=${FAIL_ON_SEVERITY:-CRITICAL,HIGH}
+      - TRIVY_TIMEOUT=${TRIVY_TIMEOUT:-30m}
       - ALLOW_ROOT_FALLBACK=${ALLOW_ROOT_FALLBACK:-false}
       - CONFIG_FILE=/app/config.yml
 
