@@ -27,7 +27,7 @@ podman compose build
 ### Run all scans
 
 ```powershell
-# Scan current directory
+# Scan the repository root
 $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
 
 # Scan a specific directory
@@ -66,7 +66,11 @@ podman compose run --rm hadolint
 
 Results are saved in the `./output` directory by default (configurable via `OUTPUT_PATH`).
 
+> Remember to create the output directory on the host if it doesn't exist, and ensure the container user has write permissions to it.
+
 When you scan a project directory, prefer setting `OUTPUT_PATH` to a directory *outside* the scanned tree. Otherwise, generated reports can be picked up by later scans and create false positives.
+
+> In both Compose and direct-run modes, avoid mounting `/output` to a directory inside the scanned source tree. Keep reports in a sibling or separate directory.
 
 ### Generated files
 
@@ -92,7 +96,7 @@ output/
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `SCAN_PATH` | `../..` | Directory to scan |
+| `SCAN_PATH` | `.` | Directory to scan |
 | `OUTPUT_PATH` | `./output` | Results directory |
 | `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude |
 | `FAIL_ON_SEVERITY` | `CRITICAL,HIGH` | Severity levels that cause failure |
@@ -128,8 +132,6 @@ On runtimes that do not permit in-container UID/GID switching (rootless containe
 Use `podman compose` or `docker compose` as the default path when possible. In this repository, Compose is the safer and more convenient wrapper because it already applies the hardened runtime settings used by the scanner: read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, tmpfs mounts for writable transient paths, the output bind mount, and the persistent Trivy cache volume.
 
 > Direct `podman run` or `docker run` is fully supported, but it is a lower-level interface. If you use it, *you are responsible for reproducing the same security controls and writable mounts yourself*.
->
-> In both Compose and direct-run modes, avoid mounting `/output` to a directory inside the scanned source tree. Keep reports in a sibling or separate directory.
 
 ## Direct Podman usage
 
@@ -137,18 +139,83 @@ Use `podman compose` or `docker compose` as the default path when possible. In t
 # Build
 podman build -t localhost/security-scanner .
 
-# Run all scans
-podman run --rm `
-  -v "D:/path/to/scan:/workspace:ro" `
-  -v "D:/path/to/output:/output" `
-  localhost/security-scanner all
+# Create the persistent Trivy cache volume once
+podman volume exists security-scanner-trivy-cache 2>$null
+if ($LASTEXITCODE -ne 0) { podman volume create security-scanner-trivy-cache | Out-Null }
 
-# Run specific scan
-podman run --rm `
-  -v "D:/path/to/scan:/workspace:ro" `
-  -v "D:/path/to/output:/output" `
-  localhost/security-scanner gitleaks
+# Run all scans with the same hardening used by compose
+$scanPath = 'D:/path/to/scan'
+$outputPath = 'D:/path/to/output'
+$workspaceMount = "type=bind,src=$scanPath,dst=/workspace,readonly"
+$outputMount = "type=bind,src=$outputPath,dst=/output"
+$cacheMount = 'type=volume,src=security-scanner-trivy-cache,dst=/var/lib/trivy'
+podman run --rm --init --read-only `
+  --cap-drop=ALL `
+  --security-opt no-new-privileges:true `
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
+  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
+  --mount $workspaceMount `
+  --mount $outputMount `
+  --mount $cacheMount `
+  --env SCAN_DIR=/workspace `
+  --env OUTPUT_DIR=/output `
+  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env ALLOW_ROOT_FALLBACK=false `
+  --env CONFIG_FILE=/app/config.yml `
+  localhost/security-scanner:latest all
+
+# Run a specific scan
+podman run --rm --init --read-only `
+  --cap-drop=ALL `
+  --security-opt no-new-privileges:true `
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
+  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
+  --mount $workspaceMount `
+  --mount $outputMount `
+  --mount $cacheMount `
+  --env SCAN_DIR=/workspace `
+  --env OUTPUT_DIR=/output `
+  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env ALLOW_ROOT_FALLBACK=false `
+  --env CONFIG_FILE=/app/config.yml `
+  localhost/security-scanner:latest gitleaks
 ```
+
+## Direct Docker usage
+
+```powershell
+# Build
+docker build -t localhost/security-scanner .
+
+# Create the persistent Trivy cache volume once
+docker volume inspect security-scanner-trivy-cache *> $null
+if ($LASTEXITCODE -ne 0) { docker volume create security-scanner-trivy-cache | Out-Null }
+
+$scanPath = 'D:/path/to/scan'
+$outputPath = 'D:/path/to/output'
+$workspaceMount = "type=bind,src=$scanPath,dst=/workspace,readonly"
+$outputMount = "type=bind,src=$outputPath,dst=/output"
+$cacheMount = 'type=volume,src=security-scanner-trivy-cache,dst=/var/lib/trivy'
+docker run --rm --init --read-only `
+  --cap-drop=ALL `
+  --security-opt no-new-privileges:true `
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
+  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
+  --mount $workspaceMount `
+  --mount $outputMount `
+  --mount $cacheMount `
+  --env SCAN_DIR=/workspace `
+  --env OUTPUT_DIR=/output `
+  --env SKIP_DIRS=node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
+  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
+  --env ALLOW_ROOT_FALLBACK=false `
+  --env CONFIG_FILE=/app/config.yml `
+  localhost/security-scanner:latest all
+```
+
+When using direct container invocations, keep the output directory outside the scanned source tree. In PowerShell, passing the mount specification through variables avoids quoting issues with `--mount`. If you explicitly need root execution because your runtime cannot drop privileges inside the container, add `--user 0:0` and set `ALLOW_ROOT_FALLBACK=true` for that run.
 
 ## Output Format
 

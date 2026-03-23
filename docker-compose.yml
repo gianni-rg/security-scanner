@@ -6,7 +6,10 @@
 #   # Build the image
 #   podman compose build
 #
-#   # Run all scans on current directory
+#   # Compose is the preferred path because it already applies the hardened
+#   # runtime settings used by this repository.
+#
+#   # Run all scans on the repository root
 #   $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
 #
 #   # Run specific scan
@@ -19,6 +22,15 @@
 #
 #   # Export results to a specific directory
 #   $env:OUTPUT_PATH='D:/path/to/output'; podman compose run --rm security-scanner
+#
+#   # Keep OUTPUT_PATH outside the scanned tree to avoid generated reports being
+#   # picked up by later scans.
+#
+#   # If you must use direct podman/docker run instead of compose, reproduce the
+#   # same hardening explicitly: read-only root filesystem, dropped caps,
+#   # no-new-privileges, tmpfs mounts for /tmp and /run, a writable /output bind
+#   # mount, and a persistent /var/lib/trivy volume. In PowerShell, pass --mount
+#   # values through variables to avoid quoting issues.
 # =============================================================================
 
 services:
@@ -40,7 +52,7 @@ services:
     # Mount the directory to scan and output directory
     volumes:
       # Source code to scan (default: repository root)
-      - ${SCAN_PATH:-../..}:/workspace:ro
+      - ${SCAN_PATH:-.}:/workspace:ro
       # Output directory for results
       - ${OUTPUT_PATH:-./output}:/output
       - trivy-cache:/var/lib/trivy
