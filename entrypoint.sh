@@ -12,6 +12,10 @@
 #   podman run --rm localhost/security-scanner trivy-license # Run Trivy license scan
 #   podman run --rm localhost/security-scanner syft          # Run Syft SBOM generation
 #   podman run --rm localhost/security-scanner hadolint      # Run Hadolint
+#   podman run --rm localhost/security-scanner shellcheck    # Run ShellCheck
+#   podman run --rm localhost/security-scanner yamllint      # Run yamllint
+# Run optional Trivy image scan
+#   podman run --rm -e IMAGE_REF=ghcr.io/org/app:tag localhost/security-scanner trivy-image
 # =============================================================================
 
 set -euo pipefail
@@ -100,6 +104,7 @@ csv_contains() {
 build_skip_args() {
     local flag=$1
     local array_name=$2
+    # shellcheck disable=SC2178
     local -n target_array="$array_name"
     local -a skip_args=()
     local item
@@ -107,6 +112,20 @@ build_skip_args() {
         [ -n "$item" ] && skip_args+=("$flag" "$item")
     done
     target_array=("${skip_args[@]}")
+}
+
+path_is_skipped() {
+    local path=$1
+    local item
+    for item in "${SKIP_DIR_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        case "$path" in
+            "./${item}"|"./${item}/"*|*/"${item}"|*/"${item}/"*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
 }
 
 semgrep_severity_fails() {
@@ -141,6 +160,18 @@ trivy_severity_fails() {
     return 1
 }
 
+yamllint_severity_fails() {
+    local errors=$1
+    local warnings=$2
+    if [ "$errors" -gt 0 ] && csv_contains YAMLLINT_FAIL_ON_ARRAY ERROR; then
+        return 0
+    fi
+    if [ "$warnings" -gt 0 ] && csv_contains YAMLLINT_FAIL_ON_ARRAY WARNING; then
+        return 0
+    fi
+    return 1
+}
+
 DEFAULT_SKIP_DIRS="$(get_config_value general.skip_dirs)"
 DEFAULT_SEMGREP_RULESETS="$(get_config_value semgrep.rulesets)"
 DEFAULT_FAIL_THRESHOLD="$(get_config_value semgrep.fail_on_severity)"
@@ -148,6 +179,8 @@ DEFAULT_FORBIDDEN_LICENSES="$(get_config_value trivy.license.forbidden_licenses)
 DEFAULT_TRIVY_TIMEOUT="$(get_config_value trivy.timeout)"
 DEFAULT_HADOLINT_FAIL_ON="$(get_config_value hadolint.fail_on)"
 DEFAULT_HADOLINT_IGNORED_RULES="$(get_config_value hadolint.ignored_rules)"
+DEFAULT_SHELLCHECK_SEVERITY="$(get_config_value shellcheck.severity)"
+DEFAULT_YAMLLINT_FAIL_ON="$(get_config_value yamllint.fail_on)"
 
 SKIP_DIRS="${SKIP_DIRS:-${DEFAULT_SKIP_DIRS:-node_modules,vendor,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods}}"
 FAIL_ON_SEVERITY="${FAIL_ON_SEVERITY:-$(threshold_to_fail_list "${DEFAULT_FAIL_THRESHOLD:-HIGH}")}"
@@ -156,15 +189,21 @@ FORBIDDEN_LICENSES="${FORBIDDEN_LICENSES:-${DEFAULT_FORBIDDEN_LICENSES:-GPL-3.0,
 TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-${DEFAULT_TRIVY_TIMEOUT:-30m}}"
 HADOLINT_FAIL_ON="${HADOLINT_FAIL_ON:-${DEFAULT_HADOLINT_FAIL_ON:-error}}"
 HADOLINT_IGNORED_RULES="${HADOLINT_IGNORED_RULES:-${DEFAULT_HADOLINT_IGNORED_RULES:-}}"
+SHELLCHECK_SEVERITY="${SHELLCHECK_SEVERITY:-${DEFAULT_SHELLCHECK_SEVERITY:-warning}}"
+YAMLLINT_FAIL_ON="${YAMLLINT_FAIL_ON:-${DEFAULT_YAMLLINT_FAIL_ON:-error,warning}}"
+YAMLLINT_CONFIG_DATA="${YAMLLINT_CONFIG_DATA:-{extends: default, rules: {line-length: disable, comments: disable, comments-indentation: disable, document-start: disable}}}"
+IMAGE_REF="${IMAGE_REF:-}"
 ALLOW_ROOT_FALLBACK="${ALLOW_ROOT_FALLBACK:-false}"
 
-declare -a SKIP_DIR_ARRAY FAIL_ON_SEVERITY_ARRAY SEMGREP_RULESET_ARRAY FORBIDDEN_LICENSE_ARRAY HADOLINT_FAIL_ON_ARRAY HADOLINT_IGNORED_RULES_ARRAY
+# shellcheck disable=SC2034
+declare -a SKIP_DIR_ARRAY FAIL_ON_SEVERITY_ARRAY SEMGREP_RULESET_ARRAY FORBIDDEN_LICENSE_ARRAY HADOLINT_FAIL_ON_ARRAY HADOLINT_IGNORED_RULES_ARRAY YAMLLINT_FAIL_ON_ARRAY
 split_csv "$SKIP_DIRS" SKIP_DIR_ARRAY
 split_csv "$FAIL_ON_SEVERITY" FAIL_ON_SEVERITY_ARRAY
 split_csv "$SEMGREP_RULESETS" SEMGREP_RULESET_ARRAY
 split_csv "$FORBIDDEN_LICENSES" FORBIDDEN_LICENSE_ARRAY
 split_csv "$HADOLINT_FAIL_ON" HADOLINT_FAIL_ON_ARRAY
 split_csv "$HADOLINT_IGNORED_RULES" HADOLINT_IGNORED_RULES_ARRAY
+split_csv "$YAMLLINT_FAIL_ON" YAMLLINT_FAIL_ON_ARRAY
 
 # Ensure output directory exists
 mkdir -p "${OUTPUT_DIR}"
@@ -359,7 +398,8 @@ run_gitleaks() {
 
     # Count secrets
     if [ -f "${output_file}" ]; then
-        local secrets_count=$(jq 'length' "${output_file}" 2>/dev/null || echo 0)
+        local secrets_count
+        secrets_count=$(jq 'length' "${output_file}" 2>/dev/null || echo 0)
 
         if [ "${secrets_count}" -gt 0 ]; then
             log_result "Gitleaks" "FAILED" "${secrets_count} secrets found"
@@ -407,9 +447,12 @@ run_semgrep() {
 
     # Count findings by severity
     if [ -f "${output_file}" ]; then
-        local total=$(jq '.results | length' "${output_file}" 2>/dev/null || echo 0)
-        local errors=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local warnings=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' "${output_file}" 2>/dev/null || echo 0)
+        local total
+        local errors
+        local warnings
+        total=$(jq '.results | length' "${output_file}" 2>/dev/null || echo 0)
+        errors=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "${output_file}" 2>/dev/null || echo 0)
+        warnings=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' "${output_file}" 2>/dev/null || echo 0)
 
         if semgrep_severity_fails "$errors" "$warnings"; then
             log_result "Semgrep" "FAILED" "Total: ${total}, Errors: ${errors}, Warnings: ${warnings}"
@@ -475,10 +518,14 @@ run_trivy_vuln() {
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
-        local critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local medium=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local low=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
+        local critical
+        local high
+        local medium
+        local low
+        critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "${output_file}" 2>/dev/null || echo 0)
+        high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "${output_file}" 2>/dev/null || echo 0)
+        medium=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
+        low=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
 
         if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
             log_result "Trivy-Vuln" "FAILED" "Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
@@ -511,7 +558,7 @@ run_trivy_config() {
     if find . -name "*.tf" 2>/dev/null | grep -q .; then has_iac="true"; fi
     if find . -name "Dockerfile*" 2>/dev/null | grep -q .; then has_iac="true"; fi
     if find . -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . -name "*.yaml" -o -name "*.yml" 2>/dev/null | xargs grep -l "apiVersion:" 2>/dev/null | head -1 | grep -q . 2>/dev/null; then has_iac="true"; fi
+    if find . \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l -m 1 "apiVersion:" {} + 2>/dev/null | head -1 | grep -q . 2>/dev/null; then has_iac="true"; fi
 
     if [ "${has_iac}" = "false" ]; then
         log_result "Trivy-Config" "SKIPPED" "No IaC files found"
@@ -544,11 +591,16 @@ run_trivy_config() {
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
-        local misconfig_count=$(jq '[.Results[]?.Misconfigurations[]?] | length' "${output_file}" 2>/dev/null || echo 0)
-        local critical=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="CRITICAL")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local high=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="HIGH")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local medium=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
-        local low=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
+        local misconfig_count
+        local critical
+        local high
+        local medium
+        local low
+        misconfig_count=$(jq '[.Results[]?.Misconfigurations[]?] | length' "${output_file}" 2>/dev/null || echo 0)
+        critical=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="CRITICAL")] | length' "${output_file}" 2>/dev/null || echo 0)
+        high=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="HIGH")] | length' "${output_file}" 2>/dev/null || echo 0)
+        medium=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
+        low=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
 
         if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
             log_result "Trivy-Config" "FAILED" "Total: ${misconfig_count}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
@@ -603,7 +655,8 @@ run_trivy_license() {
 
     # Count licenses
     if [ -f "${output_file}" ]; then
-        local license_count=$(jq '[.Results[]?.Licenses[]?] | length' "${output_file}" 2>/dev/null || echo 0)
+        local license_count
+        license_count=$(jq '[.Results[]?.Licenses[]?] | length' "${output_file}" 2>/dev/null || echo 0)
         while IFS= read -r license_name; do
             for forbidden_license in "${FORBIDDEN_LICENSE_ARRAY[@]}"; do
                 if [ -n "$forbidden_license" ] && [[ "$license_name" == "$forbidden_license"* ]]; then
@@ -623,6 +676,237 @@ run_trivy_license() {
         fi
     else
         log_result "Trivy-License" "PASSED" "License scan completed"
+    fi
+}
+
+write_yamllint_json_report() {
+    local input_file=$1
+    local output_file=$2
+    python - "$input_file" "$output_file" <<'PY'
+import json
+import re
+import sys
+
+input_path, output_path = sys.argv[1], sys.argv[2]
+pattern = re.compile(r'^(.*?):(\d+):(\d+): \[(error|warning)\] (.*)$')
+results = []
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    for raw_line in handle:
+        line = raw_line.rstrip('\n')
+        match = pattern.match(line)
+        if not match:
+            continue
+        file_path, line_no, column_no, level, message = match.groups()
+        results.append(
+            {
+                'file': file_path,
+                'line': int(line_no),
+                'column': int(column_no),
+                'level': level,
+                'message': message,
+            }
+        )
+
+with open(output_path, 'w', encoding='utf-8') as handle:
+    json.dump(results, handle, indent=2)
+PY
+}
+
+write_shellcheck_sarif_report() {
+    local input_file=$1
+    local output_file=$2
+    python - "$input_file" "$output_file" <<'PY'
+import json
+import sys
+
+input_path, output_path = sys.argv[1], sys.argv[2]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    findings = json.load(handle)
+
+rules = {}
+results = []
+for finding in findings:
+    rule_id = f"SC{finding.get('code', 'unknown')}"
+    level = finding.get('level', 'warning').lower()
+    rules[rule_id] = {
+        'id': rule_id,
+        'name': rule_id,
+        'shortDescription': {'text': rule_id},
+        'helpUri': f"https://www.shellcheck.net/wiki/{rule_id}",
+    }
+    results.append(
+        {
+            'ruleId': rule_id,
+            'level': 'error' if level == 'error' else 'warning',
+            'message': {'text': finding.get('message', '')},
+            'locations': [
+                {
+                    'physicalLocation': {
+                        'artifactLocation': {'uri': finding.get('file', '')},
+                        'region': {
+                            'startLine': finding.get('line', 1),
+                            'startColumn': finding.get('column', 1),
+                            'endLine': finding.get('endLine', finding.get('line', 1)),
+                            'endColumn': finding.get('endColumn', finding.get('column', 1)),
+                        },
+                    }
+                }
+            ],
+        }
+    )
+
+sarif = {
+    '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',
+    'version': '2.1.0',
+    'runs': [
+        {
+            'tool': {
+                'driver': {
+                    'name': 'ShellCheck',
+                    'informationUri': 'https://www.shellcheck.net/',
+                    'rules': list(rules.values()),
+                }
+            },
+            'results': results,
+        }
+    ],
+}
+
+with open(output_path, 'w', encoding='utf-8') as handle:
+    json.dump(sarif, handle, indent=2)
+PY
+}
+
+write_yamllint_sarif_report() {
+    local input_file=$1
+    local output_file=$2
+    python - "$input_file" "$output_file" <<'PY'
+import json
+import sys
+
+input_path, output_path = sys.argv[1], sys.argv[2]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    findings = json.load(handle)
+
+rules = {
+    'yamllint-error': {
+        'id': 'yamllint-error',
+        'name': 'yamllint-error',
+        'shortDescription': {'text': 'yamllint error'},
+        'helpUri': 'https://yamllint.readthedocs.io/',
+    },
+    'yamllint-warning': {
+        'id': 'yamllint-warning',
+        'name': 'yamllint-warning',
+        'shortDescription': {'text': 'yamllint warning'},
+        'helpUri': 'https://yamllint.readthedocs.io/',
+    },
+}
+
+results = []
+for finding in findings:
+    level = finding.get('level', 'warning').lower()
+    rule_id = f"yamllint-{level}"
+    results.append(
+        {
+            'ruleId': rule_id,
+            'level': 'error' if level == 'error' else 'warning',
+            'message': {'text': finding.get('message', '')},
+            'locations': [
+                {
+                    'physicalLocation': {
+                        'artifactLocation': {'uri': finding.get('file', '')},
+                        'region': {
+                            'startLine': finding.get('line', 1),
+                            'startColumn': finding.get('column', 1),
+                        },
+                    }
+                }
+            ],
+        }
+    )
+
+sarif = {
+    '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',
+    'version': '2.1.0',
+    'runs': [
+        {
+            'tool': {
+                'driver': {
+                    'name': 'yamllint',
+                    'informationUri': 'https://yamllint.readthedocs.io/',
+                    'rules': list(rules.values()),
+                }
+            },
+            'results': results,
+        }
+    ],
+}
+
+with open(output_path, 'w', encoding='utf-8') as handle:
+    json.dump(sarif, handle, indent=2)
+PY
+}
+
+# =============================================================================
+# TRIVY - Container Image Scanning
+# =============================================================================
+run_trivy_image() {
+    log_start "Trivy (Container Image Scanning)"
+
+    local output_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.json"
+    local sarif_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif"
+    local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
+    local trivy_json_exit=0
+    local trivy_sarif_exit=0
+    local trivy_table_exit=0
+
+    if [ -z "${IMAGE_REF}" ]; then
+        log_result "Trivy-Image" "SKIPPED" "IMAGE_REF is not set"
+        return
+    fi
+
+    run_as_scanner trivy image \
+        --format json \
+        --output "${output_file}" \
+        --timeout "${TRIVY_TIMEOUT}" \
+        --severity CRITICAL,HIGH,MEDIUM,LOW \
+        "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
+
+    run_as_scanner trivy image \
+        --format sarif \
+        --output "${sarif_file}" \
+        --timeout "${TRIVY_TIMEOUT}" \
+        --severity CRITICAL,HIGH,MEDIUM,LOW \
+        "${IMAGE_REF}" 2>&1 || trivy_sarif_exit=$?
+
+    run_as_scanner trivy image \
+        --format table \
+        --timeout "${TRIVY_TIMEOUT}" \
+        --severity CRITICAL,HIGH,MEDIUM,LOW \
+        "${IMAGE_REF}" 2>&1 | tee "${table_file}" || trivy_table_exit=$?
+
+    if ! ensure_valid_json_report "${output_file}"; then
+        log_result "Trivy-Image" "FAILED" "Execution failed for ${IMAGE_REF} (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
+        return
+    fi
+
+    local critical
+    local high
+    local medium
+    local low
+    critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "${output_file}" 2>/dev/null || echo 0)
+    high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "${output_file}" 2>/dev/null || echo 0)
+    medium=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
+    low=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
+
+    if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
+        log_result "Trivy-Image" "FAILED" "Image: ${IMAGE_REF}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
+    else
+        log_result "Trivy-Image" "PASSED" "Image: ${IMAGE_REF}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
     fi
 }
 
@@ -660,7 +944,8 @@ run_syft() {
 
     # Count packages
     if [ -f "${spdx_file}" ]; then
-        local package_count=$(jq '.packages | length' "${spdx_file}" 2>/dev/null || echo 0)
+        local package_count
+        package_count=$(jq '.packages | length' "${spdx_file}" 2>/dev/null || echo 0)
         log_result "Syft" "PASSED" "${package_count} packages cataloged"
     else
         log_result "Syft" "PASSED" "SBOM generated"
@@ -676,9 +961,11 @@ run_hadolint() {
     local output_file="${OUTPUT_DIR}/hadolint_${TIMESTAMP}.json"
     local sarif_file="${OUTPUT_DIR}/hadolint_${TIMESTAMP}.sarif"
     local -a ignore_args=()
+    local -a dockerfiles=()
     local -a failing_levels=()
     local ignored_rule
     local issue_level
+    local dockerfile
 
     cd "${SCAN_DIR}"
 
@@ -687,9 +974,13 @@ run_hadolint() {
     done
 
     # Find Dockerfiles
-    local dockerfiles=$(find . -name "Dockerfile*" -o -name "*.dockerfile" 2>/dev/null | grep -v node_modules | grep -v vendor)
+    while IFS= read -r -d '' dockerfile; do
+        if ! path_is_skipped "$dockerfile"; then
+            dockerfiles+=("$dockerfile")
+        fi
+    done < <(find . -type f \( -name "Dockerfile*" -o -name "*.dockerfile" \) -print0)
 
-    if [ -z "${dockerfiles}" ]; then
+    if [ "${#dockerfiles[@]}" -eq 0 ]; then
         log_result "Hadolint" "SKIPPED" "No Dockerfiles found"
         return
     fi
@@ -697,11 +988,13 @@ run_hadolint() {
     local total_issues=0
     local all_results="[]"
 
-    for dockerfile in ${dockerfiles}; do
+    for dockerfile in "${dockerfiles[@]}"; do
         echo "  Scanning: ${dockerfile}"
-        local result=$(run_as_scanner hadolint --format json "${ignore_args[@]}" "${dockerfile}" 2>/dev/null || echo "[]")
+        local result
+        local count
+        result=$(run_as_scanner hadolint --format json "${ignore_args[@]}" "${dockerfile}" 2>/dev/null || echo "[]")
         all_results=$(echo "${all_results}" "${result}" | jq -s 'add')
-        local count=$(echo "${result}" | jq 'length' 2>/dev/null | tr -d '[:space:]' || echo 0)
+        count=$(echo "${result}" | jq 'length' 2>/dev/null | tr -d '[:space:]' || echo 0)
         count=${count:-0}
         total_issues=$((total_issues + count))
     done
@@ -709,9 +1002,12 @@ run_hadolint() {
     echo "${all_results}" > "${output_file}"
 
     # Count by severity
-    local errors=$(echo "${all_results}" | jq '[.[] | select(.level == "error")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
-    local warnings=$(echo "${all_results}" | jq '[.[] | select(.level == "warning")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
-    local styles=$(echo "${all_results}" | jq '[.[] | select(.level == "style" or .level == "info")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
+    local errors
+    local warnings
+    local styles
+    errors=$(echo "${all_results}" | jq '[.[] | select(.level == "error")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
+    warnings=$(echo "${all_results}" | jq '[.[] | select(.level == "warning")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
+    styles=$(echo "${all_results}" | jq '[.[] | select(.level == "style" or .level == "info")] | length' 2>/dev/null | tr -d '[:space:]' || echo 0)
     errors=${errors:-0}
     warnings=${warnings:-0}
     styles=${styles:-0}
@@ -734,6 +1030,117 @@ run_hadolint() {
         log_result "Hadolint" "FAILED" "Errors: ${errors}, Warnings: ${warnings}, Style: ${styles}"
     else
         log_result "Hadolint" "PASSED" "Errors: ${errors}, Warnings: ${warnings}, Style: ${styles}"
+    fi
+}
+
+# =============================================================================
+# SHELLCHECK - Shell Script Static Analysis
+# =============================================================================
+run_shellcheck() {
+    log_start "ShellCheck (Shell Script Linting)"
+
+    local output_file="${OUTPUT_DIR}/shellcheck_${TIMESTAMP}.json"
+    local report_file="${OUTPUT_DIR}/shellcheck_${TIMESTAMP}.txt"
+    local sarif_file="${OUTPUT_DIR}/shellcheck_${TIMESTAMP}.sarif"
+    local -a shell_files=()
+    local all_results='[]'
+    local shell_file
+
+    cd "${SCAN_DIR}"
+
+    while IFS= read -r -d '' shell_file; do
+        if ! path_is_skipped "$shell_file"; then
+            shell_files+=("$shell_file")
+        fi
+    done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+
+    if [ "${#shell_files[@]}" -eq 0 ]; then
+        log_result "ShellCheck" "SKIPPED" "No shell scripts found"
+        return
+    fi
+
+    : > "${report_file}"
+    for shell_file in "${shell_files[@]}"; do
+        local raw_result
+        local result
+        raw_result=$(run_as_scanner shellcheck --format=json1 --severity="${SHELLCHECK_SEVERITY}" "${shell_file}" 2>/dev/null || echo '{"comments": []}')
+        result=$(echo "${raw_result}" | jq '.comments // []')
+        all_results=$(echo "${all_results}" "${result}" | jq -s 'add')
+        run_as_scanner shellcheck --format=gcc --severity="${SHELLCHECK_SEVERITY}" "${shell_file}" 2>/dev/null >> "${report_file}" || true
+    done
+
+    echo "${all_results}" > "${output_file}"
+    write_shellcheck_sarif_report "${output_file}" "${sarif_file}"
+
+    local total
+    local errors
+    local warnings
+    local infos
+    total=$(jq 'length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    errors=$(jq '[.[] | select(.level == "error")] | length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    warnings=$(jq '[.[] | select(.level == "warning")] | length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    infos=$(jq '[.[] | select(.level == "info" or .level == "style")] | length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    total=${total:-0}
+    errors=${errors:-0}
+    warnings=${warnings:-0}
+    infos=${infos:-0}
+
+    if [ "$total" -gt 0 ]; then
+        log_result "ShellCheck" "FAILED" "Total: ${total}, Errors: ${errors}, Warnings: ${warnings}, Info/Style: ${infos}"
+    else
+        log_result "ShellCheck" "PASSED" "No shell issues found"
+    fi
+}
+
+# =============================================================================
+# YAMLLINT - YAML Linting
+# =============================================================================
+run_yamllint() {
+    log_start "yamllint (YAML Validation)"
+
+    local output_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.json"
+    local report_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.txt"
+    local sarif_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.sarif"
+    local -a yaml_files=()
+    local yaml_file
+    local yamllint_exit=0
+
+    cd "${SCAN_DIR}"
+
+    while IFS= read -r -d '' yaml_file; do
+        if ! path_is_skipped "$yaml_file"; then
+            yaml_files+=("$yaml_file")
+        fi
+    done < <(find . -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+
+    if [ "${#yaml_files[@]}" -eq 0 ]; then
+        log_result "yamllint" "SKIPPED" "No YAML files found"
+        return
+    fi
+
+    run_as_scanner yamllint -f parsable -d "${YAMLLINT_CONFIG_DATA}" "${yaml_files[@]}" 2>&1 | tee "${report_file}" || yamllint_exit=$?
+    write_yamllint_json_report "${report_file}" "${output_file}"
+    write_yamllint_sarif_report "${output_file}" "${sarif_file}"
+
+    if ! ensure_valid_json_report "${output_file}"; then
+        log_result "yamllint" "FAILED" "Execution failed with exit code ${yamllint_exit}"
+        return
+    fi
+
+    local total
+    local errors
+    local warnings
+    total=$(jq 'length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    errors=$(jq '[.[] | select(.level == "error")] | length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    warnings=$(jq '[.[] | select(.level == "warning")] | length' "${output_file}" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    total=${total:-0}
+    errors=${errors:-0}
+    warnings=${warnings:-0}
+
+    if yamllint_severity_fails "$errors" "$warnings"; then
+        log_result "yamllint" "FAILED" "Total: ${total}, Errors: ${errors}, Warnings: ${warnings}"
+    else
+        log_result "yamllint" "PASSED" "Total: ${total}, Errors: ${errors}, Warnings: ${warnings}"
     fi
 }
 
@@ -793,6 +1200,28 @@ extract_hadolint_details() {
     fi
 }
 
+extract_shellcheck_details() {
+    local output_file="${OUTPUT_DIR}/shellcheck_${TIMESTAMP}.json"
+    if [ -f "${output_file}" ]; then
+        jq -r '
+            [.[] | select(.level == "error" or .level == "warning")] |
+            .[:20][] |
+            "- **[\(.level | ascii_upcase)]** SC\(.code) in `\(.file)`:\(.line) - \(.message | .[0:80])"
+        ' "${output_file}" 2>/dev/null
+    fi
+}
+
+extract_yamllint_details() {
+    local output_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.json"
+    if [ -f "${output_file}" ]; then
+        jq -r '
+            [.[] | select(.level == "error" or .level == "warning")] |
+            .[:20][] |
+            "- **[\(.level | ascii_upcase)]** in `\(.file)`:\(.line):\(.column) - \(.message | .[0:80])"
+        ' "${output_file}" 2>/dev/null
+    fi
+}
+
 # =============================================================================
 # Generate Summary Report
 # =============================================================================
@@ -817,7 +1246,8 @@ generate_summary() {
     if [ "${SCAN_RESULTS[Trivy-Vuln]}" = "FAILED" ]; then
         local trivy_file="${OUTPUT_DIR}/trivy-vuln_${TIMESTAMP}.json"
         if [ -f "${trivy_file}" ]; then
-            local trivy_details=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | sort_by(.Severity) | reverse | .[0:20] | map({id: .VulnerabilityID, severity: .Severity, package: .PkgName, installed: .InstalledVersion, fixed: .FixedVersion, title: (.Title // .Description | .[0:80])})' "${trivy_file}" 2>/dev/null)
+            local trivy_details
+            trivy_details=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | sort_by(.Severity) | reverse | .[0:20] | map({id: .VulnerabilityID, severity: .Severity, package: .PkgName, installed: .InstalledVersion, fixed: .FixedVersion, title: (.Title // .Description | .[0:80])})' "${trivy_file}" 2>/dev/null)
             failure_details=$(echo "${failure_details}" | jq --argjson vulns "${trivy_details:-[]}" '.trivy_vulnerabilities = $vulns')
         fi
     fi
@@ -825,7 +1255,8 @@ generate_summary() {
     if [ "${SCAN_RESULTS[Trivy-Config]}" = "FAILED" ]; then
         local trivy_config_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.json"
         if [ -f "${trivy_config_file}" ]; then
-            local config_details=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | .[0:20] | map({id: .ID, severity: .Severity, title: .Title, resource: .CauseMetadata.Resource})' "${trivy_config_file}" 2>/dev/null)
+            local config_details
+            config_details=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | .[0:20] | map({id: .ID, severity: .Severity, title: .Title, resource: .CauseMetadata.Resource})' "${trivy_config_file}" 2>/dev/null)
             failure_details=$(echo "${failure_details}" | jq --argjson misconfig "${config_details:-[]}" '.trivy_misconfigurations = $misconfig')
         fi
     fi
@@ -833,7 +1264,8 @@ generate_summary() {
     if [ "${SCAN_RESULTS[Semgrep]}" = "FAILED" ]; then
         local semgrep_file="${OUTPUT_DIR}/semgrep_${TIMESTAMP}.json"
         if [ -f "${semgrep_file}" ]; then
-            local semgrep_details=$(jq '[.results[] | select(.extra.severity == "ERROR" or .extra.severity == "WARNING")] | .[0:20] | map({rule: .check_id, severity: .extra.severity, file: .path, line: .start.line, message: (.extra.message | .[0:80])})' "${semgrep_file}" 2>/dev/null)
+            local semgrep_details
+            semgrep_details=$(jq '[.results[] | select(.extra.severity == "ERROR" or .extra.severity == "WARNING")] | .[0:20] | map({rule: .check_id, severity: .extra.severity, file: .path, line: .start.line, message: (.extra.message | .[0:80])})' "${semgrep_file}" 2>/dev/null)
             failure_details=$(echo "${failure_details}" | jq --argjson sast "${semgrep_details:-[]}" '.semgrep = $sast')
         fi
     fi
@@ -841,8 +1273,27 @@ generate_summary() {
     if [ "${SCAN_RESULTS[Hadolint]}" = "FAILED" ]; then
         local hadolint_file="${OUTPUT_DIR}/hadolint_${TIMESTAMP}.json"
         if [ -f "${hadolint_file}" ]; then
-            local hadolint_details=$(jq '[.[] | select(.level == "error" or .level == "warning")] | .[0:20] | map({code: .code, level: .level, file: .file, line: .line, message: (.message | .[0:80])})' "${hadolint_file}" 2>/dev/null)
+            local hadolint_details
+            hadolint_details=$(jq '[.[] | select(.level == "error" or .level == "warning")] | .[0:20] | map({code: .code, level: .level, file: .file, line: .line, message: (.message | .[0:80])})' "${hadolint_file}" 2>/dev/null)
             failure_details=$(echo "${failure_details}" | jq --argjson docker "${hadolint_details:-[]}" '.hadolint = $docker')
+        fi
+    fi
+
+    if [ "${SCAN_RESULTS[ShellCheck]}" = "FAILED" ]; then
+        local shellcheck_file="${OUTPUT_DIR}/shellcheck_${TIMESTAMP}.json"
+        if [ -f "${shellcheck_file}" ]; then
+            local shellcheck_details
+            shellcheck_details=$(jq '[.[] | select(.level == "error" or .level == "warning")] | .[0:20] | map({code: .code, level: .level, file: .file, line: .line, message: (.message | .[0:80])})' "${shellcheck_file}" 2>/dev/null)
+            failure_details=$(echo "${failure_details}" | jq --argjson shell "${shellcheck_details:-[]}" '.shellcheck = $shell')
+        fi
+    fi
+
+    if [ "${SCAN_RESULTS[yamllint]}" = "FAILED" ]; then
+        local yamllint_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.json"
+        if [ -f "${yamllint_file}" ]; then
+            local yamllint_details
+            yamllint_details=$(jq '[.[] | select(.level == "error" or .level == "warning")] | .[0:20] | map({level: .level, file: .file, line: .line, column: .column, message: (.message | .[0:80])})' "${yamllint_file}" 2>/dev/null)
+            failure_details=$(echo "${failure_details}" | jq --argjson yaml "${yamllint_details:-[]}" '.yamllint = $yaml')
         fi
     fi
 
@@ -968,6 +1419,24 @@ EOF
             echo "" >> "${summary_md}"
         fi
 
+        if [ "${SCAN_RESULTS[ShellCheck]}" = "FAILED" ]; then
+            cat >> "${summary_md}" << EOF
+### 🐚 ShellCheck - Shell Script Issues
+
+EOF
+            extract_shellcheck_details >> "${summary_md}"
+            echo "" >> "${summary_md}"
+        fi
+
+        if [ "${SCAN_RESULTS[yamllint]}" = "FAILED" ]; then
+            cat >> "${summary_md}" << EOF
+### 📄 yamllint - YAML Issues
+
+EOF
+            extract_yamllint_details >> "${summary_md}"
+            echo "" >> "${summary_md}"
+        fi
+
         echo "> **Note:** Only issues that can fail the active policy are listed above (max 20 per scanner). Check individual JSON reports for complete details." >> "${summary_md}"
         echo "" >> "${summary_md}"
     fi
@@ -984,9 +1453,35 @@ All scan results are available in the output directory:
 - \`trivy-vuln_${TIMESTAMP}.json\` - Trivy vulnerability results
 - \`trivy-config_${TIMESTAMP}.json\` - Trivy IaC results
 - \`trivy-license_${TIMESTAMP}.json\` - Trivy license results
+- \`shellcheck_${TIMESTAMP}.json\` - ShellCheck results
+- \`shellcheck_${TIMESTAMP}.sarif\` - ShellCheck SARIF results
+- \`yamllint_${TIMESTAMP}.json\` - yamllint results
+- \`yamllint_${TIMESTAMP}.sarif\` - yamllint SARIF results
+- \`yamllint_${TIMESTAMP}.txt\` - yamllint parsable output
 - \`sbom_${TIMESTAMP}.spdx.json\` - SBOM (SPDX format)
 - \`sbom_${TIMESTAMP}.cyclonedx.json\` - SBOM (CycloneDX format)
 - \`hadolint_${TIMESTAMP}.json\` - Hadolint results
+EOF
+
+    if [ -f "${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.json" ]; then
+        cat >> "${summary_md}" << EOF
+- \`trivy-image_${TIMESTAMP}.json\` - Optional Trivy image scan results
+EOF
+    fi
+
+    if [ -f "${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif" ]; then
+        cat >> "${summary_md}" << EOF
+- \`trivy-image_${TIMESTAMP}.sarif\` - Optional Trivy image scan SARIF results
+EOF
+    fi
+
+    if [ -f "${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt" ]; then
+        cat >> "${summary_md}" << EOF
+- \`trivy-image_${TIMESTAMP}.txt\` - Optional Trivy image scan text output
+EOF
+    fi
+
+    cat >> "${summary_md}" << EOF
 
 ---
 EOF
@@ -1055,6 +1550,8 @@ case "${1:-all}" in
         run_trivy_license
         run_syft
         run_hadolint
+        run_shellcheck
+        run_yamllint
         generate_summary
         print_final_status
         ;;
@@ -1084,6 +1581,10 @@ case "${1:-all}" in
         run_trivy_license
         print_final_status
         ;;
+    trivy-image)
+        run_trivy_image
+        print_final_status
+        ;;
     syft|sbom)
         run_syft
         print_final_status
@@ -1092,8 +1593,16 @@ case "${1:-all}" in
         run_hadolint
         print_final_status
         ;;
+    shellcheck)
+        run_shellcheck
+        print_final_status
+        ;;
+    yamllint)
+        run_yamllint
+        print_final_status
+        ;;
     *)
-        echo "Usage: $0 {all|gitleaks|semgrep|trivy|trivy-vuln|trivy-config|trivy-license|syft|hadolint}"
+        echo "Usage: $0 {all|gitleaks|semgrep|trivy|trivy-vuln|trivy-config|trivy-license|trivy-image|syft|hadolint|shellcheck|yamllint}"
         echo ""
         echo "Commands:"
         echo "  all           Run all security scans (default)"
@@ -1103,8 +1612,11 @@ case "${1:-all}" in
         echo "  trivy-vuln    Run Trivy vulnerability scan"
         echo "  trivy-config  Run Trivy IaC/config scan"
         echo "  trivy-license Run Trivy license scan"
+        echo "  trivy-image   Run optional Trivy container image scan (requires IMAGE_REF)"
         echo "  syft          Generate SBOM with Syft"
         echo "  hadolint      Run Hadolint Dockerfile linting"
+        echo "  shellcheck    Run ShellCheck shell script analysis"
+        echo "  yamllint      Run yamllint YAML validation"
         exit 1
         ;;
 esac

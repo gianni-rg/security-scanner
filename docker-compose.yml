@@ -1,4 +1,3 @@
-
 # =============================================================================
 # Security Scanner Compose
 # =============================================================================
@@ -67,6 +66,9 @@ services:
       - FAIL_ON_SEVERITY=${FAIL_ON_SEVERITY:-CRITICAL,HIGH}
       - TRIVY_TIMEOUT=${TRIVY_TIMEOUT:-30m}
       - ALLOW_ROOT_FALLBACK=${ALLOW_ROOT_FALLBACK:-false}
+      - SHELLCHECK_SEVERITY=${SHELLCHECK_SEVERITY:-warning}
+      - YAMLLINT_FAIL_ON=${YAMLLINT_FAIL_ON:-error,warning}
+      - IMAGE_REF=${IMAGE_REF:-}
       - CONFIG_FILE=/app/config.yml
 
     # Run all scans by default
@@ -119,6 +121,24 @@ services:
     extends:
       service: security-scanner
     command: hadolint
+    depends_on: []
+
+  shellcheck:
+    extends:
+      service: security-scanner
+    command: shellcheck
+    depends_on: []
+
+  yamllint:
+    extends:
+      service: security-scanner
+    command: yamllint
+    depends_on: []
+
+  trivy-image:
+    extends:
+      service: security-scanner
+    command: trivy-image
     depends_on: []
 
 volumes:

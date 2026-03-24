@@ -11,8 +11,11 @@ This is an opinionated repository that can be used to run security scans on your
 | **Trivy** | Vulnerability Scan | Dependency vulnerability scanning |
 | **Trivy** | IaC Scan | Terraform, Docker, K8s configuration scanning |
 | **Trivy** | License Scan | Dependency license analysis |
+| **Trivy** | Image Scan | Optional container image vulnerability scanning |
 | **Syft** | SBOM | Software Bill of Materials generation |
 | **Hadolint** | Dockerfile Lint | Dockerfile best practices |
+| **ShellCheck** | Shell Script Lint | Shell script static analysis |
+| **yamllint** | YAML Lint | YAML syntax and quality validation |
 
 ## Quick Start
 
@@ -62,6 +65,15 @@ podman compose run --rm syft
 
 # Hadolint only
 podman compose run --rm hadolint
+
+# ShellCheck only
+podman compose run --rm shellcheck
+
+# yamllint only
+podman compose run --rm yamllint
+
+# Trivy image scan only
+$env:IMAGE_REF='ghcr.io/org/app:tag'; podman compose run --rm trivy-image
 ```
 
 ## Output
@@ -87,10 +99,18 @@ output/
 ├── trivy-vuln_YYYYMMDD_HHMMSS.sarif    # Trivy SARIF format
 ├── trivy-config_YYYYMMDD_HHMMSS.json   # Trivy IaC/config
 ├── trivy-license_YYYYMMDD_HHMMSS.json  # Trivy licenses
+├── shellcheck_YYYYMMDD_HHMMSS.json     # ShellCheck results
+├── shellcheck_YYYYMMDD_HHMMSS.sarif    # ShellCheck SARIF format
+├── shellcheck_YYYYMMDD_HHMMSS.txt      # ShellCheck text output
+├── yamllint_YYYYMMDD_HHMMSS.json       # yamllint results
+├── yamllint_YYYYMMDD_HHMMSS.sarif      # yamllint SARIF format
+├── yamllint_YYYYMMDD_HHMMSS.txt        # yamllint parsable output
 ├── sbom_YYYYMMDD_HHMMSS.spdx.json      # SBOM SPDX format
 ├── sbom_YYYYMMDD_HHMMSS.cyclonedx.json # SBOM CycloneDX format
 └── hadolint_YYYYMMDD_HHMMSS.json       # Hadolint results
 ```
+
+Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `trivy-image_YYYYMMDD_HHMMSS.sarif`, and `trivy-image_YYYYMMDD_HHMMSS.txt`.
 
 ## Configuration
 
@@ -107,6 +127,9 @@ output/
 | `FORBIDDEN_LICENSES` | `GPL-3.0,AGPL-3.0` | License identifiers that fail the scan |
 | `HADOLINT_FAIL_ON` | `error` | Hadolint levels that fail the scan |
 | `HADOLINT_IGNORED_RULES` | empty | Comma-separated Hadolint rules to ignore |
+| `SHELLCHECK_SEVERITY` | `warning` | Minimum ShellCheck severity included in findings |
+| `YAMLLINT_FAIL_ON` | `error,warning` | yamllint levels that fail the scan |
+| `IMAGE_REF` | empty | Container image reference used by the optional `trivy-image` command |
 
 ### Custom configuration example
 
@@ -118,6 +141,8 @@ $env:FAIL_ON_SEVERITY='CRITICAL'
 $env:TRIVY_TIMEOUT='60m'
 $env:ALLOW_ROOT_FALLBACK='true'
 $env:FORBIDDEN_LICENSES='GPL-3.0,AGPL-3.0'
+$env:SHELLCHECK_SEVERITY='warning'
+$env:YAMLLINT_FAIL_ON='error,warning'
 podman compose run --rm security-scanner
 ```
 
@@ -169,6 +194,8 @@ podman run --rm --init --read-only `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
   --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
+  --env SHELLCHECK_SEVERITY=warning `
+  --env YAMLLINT_FAIL_ON=error,warning `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest all
 
@@ -187,8 +214,26 @@ podman run --rm --init --read-only `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
   --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
+  --env SHELLCHECK_SEVERITY=warning `
+  --env YAMLLINT_FAIL_ON=error,warning `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest gitleaks
+
+# Run an optional container image scan
+$imageRef = 'ghcr.io/org/app:tag'
+podman run --rm --init --read-only `
+  --cap-drop=ALL `
+  --security-opt no-new-privileges:true `
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
+  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
+  --mount $outputMount `
+  --mount $cacheMount `
+  --env OUTPUT_DIR=/output `
+  --env TRIVY_TIMEOUT=30m `
+  --env IMAGE_REF=$imageRef `
+  --env ALLOW_ROOT_FALLBACK=false `
+  --env CONFIG_FILE=/app/config.yml `
+  localhost/security-scanner:latest trivy-image
 ```
 
 ## Direct Docker usage
@@ -220,6 +265,8 @@ docker run --rm --init --read-only `
   --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
   --env TRIVY_TIMEOUT=30m `
   --env ALLOW_ROOT_FALLBACK=false `
+  --env SHELLCHECK_SEVERITY=warning `
+  --env YAMLLINT_FAIL_ON=error,warning `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest all
 ```

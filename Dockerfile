@@ -12,6 +12,7 @@ ARG HADOLINT_VERSION=2.14.0
 ARG HADOLINT_SHA256=6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47
 ARG SEMGREP_VERSION=1.156.0
 ARG PYYAML_VERSION=6.0.2
+ARG YAMLLINT_VERSION=1.37.1
 
 LABEL maintainer="Gianni Rosa Gallina"
 LABEL description="Opinionated containerized security scanner toolset"
@@ -34,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         jq \
+    shellcheck \
         ca-certificates \
         zip \
         unzip \
@@ -68,8 +70,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /tmp/gitleaks.tar.gz \
     && gitleaks version \
     && echo "Installing Semgrep ${SEMGREP_VERSION}..." \
-    && pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" "PyYAML==${PYYAML_VERSION}" \
+    && pip install --no-cache-dir \
+        "semgrep==${SEMGREP_VERSION}" \
+        "PyYAML==${PYYAML_VERSION}" \
+        "yamllint==${YAMLLINT_VERSION}" \
     && semgrep --version \
+    && yamllint --version \
     && echo "Installing Trivy ${TRIVY_VERSION}..." \
     && curl -fsSLo /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
     && echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c - \
@@ -90,7 +96,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSLo /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64" \
     && echo "${HADOLINT_SHA256}  /usr/local/bin/hadolint" | sha256sum -c - \
     && chmod +x /usr/local/bin/hadolint \
-    && hadolint --version
+    && hadolint --version \
+    && shellcheck --version
 
 WORKDIR /tools
 
@@ -105,7 +112,7 @@ COPY --chown=scanner:scanner config.yml /app/config.yml
 RUN chmod +x /app/*.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD ["/bin/sh", "-c", "command -v gitleaks >/dev/null && command -v semgrep >/dev/null && command -v trivy >/dev/null && command -v syft >/dev/null && command -v hadolint >/dev/null"]
+    CMD ["/bin/sh", "-c", "command -v gitleaks >/dev/null && command -v semgrep >/dev/null && command -v trivy >/dev/null && command -v syft >/dev/null && command -v hadolint >/dev/null && command -v shellcheck >/dev/null && command -v yamllint >/dev/null"]
 
 # Set working directory for scans
 WORKDIR ${SCAN_DIR}

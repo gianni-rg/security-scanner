@@ -86,3 +86,17 @@ hadolint:
   ignored_rules: []
     # - DL3008
     # - DL3009
+
+# ShellCheck Configuration
+shellcheck:
+  enabled: true
+  # Minimum severity included in findings (error, warning, info, style)
+  severity: warning
+
+# yamllint Configuration
+yamllint:
+  enabled: true
+  # Fail on these levels
+  fail_on:
+    - error
+    - warning
