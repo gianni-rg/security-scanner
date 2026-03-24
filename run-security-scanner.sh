@@ -247,8 +247,8 @@ run_args=(
     --read-only
     --cap-drop=ALL
     --security-opt no-new-privileges:true
-    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777
-    --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755
+    --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777"
+    --tmpfs "/run:rw,noexec,nosuid,nodev,size=16m,mode=755"
     --mount "$output_mount"
     --mount "$cache_mount"
     --env OUTPUT_DIR=/output
