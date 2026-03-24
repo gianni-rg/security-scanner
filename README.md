@@ -1,92 +1,129 @@
 # Security Scanner
 
-This is an opinionated repository that can be used to run security scans on your codebase. It provides tools and configurations for automated and local security scans, utilizing popular scanners like Trivy and Gitleaks. The repository is currently designed to work for *local development*, helping to identify and address security vulnerabilities early in the development process (especially when using AI-based coding agents).
+Security Scanner is an opinionated, hardened, containerized scanner for source repositories and container images. It packages Gitleaks, Semgrep, Trivy, Syft, Hadolint, ShellCheck, and yamllint behind a single runtime contract so you can scan code without granting the container broad host access.
 
 ## Included Tools
 
 | Tool | Function | Description |
 | ---- | -------- | ----------- |
-| **Gitleaks** | Secret Detection | Detects secrets, API keys, passwords in code |
-| **Semgrep** | SAST | Static Application Security Testing |
-| **Trivy** | Vulnerability Scan | Dependency vulnerability scanning |
+| **[Gitleaks](https://github.com/gitleaks/gitleaks)** | Secret Detection | Detects secrets, API keys, passwords in code |
+| **[Semgrep](https://semgrep.dev/)** | SAST | Static Application Security Testing |
+| **[Trivy](https://github.com/aquasecurity/trivy)** | Vulnerability Scan | Dependency vulnerability scanning |
 | **Trivy** | IaC Scan | Terraform, Docker, K8s configuration scanning |
 | **Trivy** | License Scan | Dependency license analysis |
 | **Trivy** | Image Scan | Optional container image vulnerability scanning |
-| **Syft** | SBOM | Software Bill of Materials generation |
-| **Hadolint** | Dockerfile Lint | Dockerfile best practices |
-| **ShellCheck** | Shell Script Lint | Shell script static analysis |
-| **yamllint** | YAML Lint | YAML syntax and quality validation |
+| **[Syft](https://github.com/anchore/syft)** | SBOM | Software Bill of Materials generation |
+| **[Hadolint](https://github.com/hadolint/hadolint)** | Dockerfile Lint | Dockerfile best practices |
+| **[ShellCheck](https://github.com/koalaman/shellcheck)** | Shell Script Lint | Shell script static analysis |
+| **[yamllint](https://github.com/adrienverge/yamllint)** | YAML Lint | YAML syntax and quality validation |
+
+## What This Project Is For
+
+This repository serves two audiences:
+
+1. Consumers who want to run the scanner image from any repository through an opinionated wrapper.
+2. Maintainers who want to build, test, and evolve the scanner itself.
+
+The supported consumer entrypoints are the wrapper scripts in the repository root:
+
+1. `run-security-scanner.ps1` for PowerShell
+2. `run-security-scanner.sh` for Bash
+
+The supported maintainer entrypoint is `podman compose` or `docker compose` using `docker-compose.yml`.
+
+## Use this scanner from any repository
+
+The wrapper scripts are the primary interface for running the scanner outside this repository. They pick Podman or Docker automatically, create the output directory, ensure the Trivy cache volume exists, and apply the hardened container settings used by this project.
+
+If you publish the image to a registry, pass that image reference with `-Image` or `--image`. The wrappers default to `localhost/security-scanner:latest`, which is convenient for local development after building the image from this repository.
+
+## Requirements
+
+1. [Podman](https://podman.io/) or [Docker](https://www.docker.com/) installed locally
+2. [PowerShell](https://learn.microsoft.com/powershell/scripting/install/install-powershell-on-windows) 7 or later for `run-security-scanner.ps1`, or Bash for `run-security-scanner.sh`
+3. Permission to create an output directory and a local container volume for Trivy cache data
 
 ## Quick Start
 
-> All the development and usage instructions assume you are in Windows with PowerShell v7.x or later, and have either Docker or Podman installed on your machine. The examples below use `podman` as the runtime, but you can replace it with `docker` if you prefer.
-
-### Build the image
+### PowerShell
 
 ```powershell
-# Podman defaults to OCI image format, which ignores HEALTHCHECK.
-# Build in Docker format so the image keeps the declared health check.
-podman build --format docker -t localhost/security-scanner:latest .
+./run-security-scanner.ps1 -ScanPath . -Command all
+./run-security-scanner.ps1 -ScanPath . -Command gitleaks
+./run-security-scanner.ps1 -Command trivy-image -ImageRef ghcr.io/org/app:tag
 ```
 
-### Run all scans
+### Bash
+
+```bash
+./run-security-scanner.sh --scan-path . --command all
+./run-security-scanner.sh --scan-path . --command gitleaks
+./run-security-scanner.sh --command trivy-image --image-ref ghcr.io/org/app:tag
+```
+
+### Override The Image
 
 ```powershell
-# Scan the repository root
-$env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
-
-# Scan a specific directory
-$env:SCAN_PATH='D:/path/to/your/project'; $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
+./run-security-scanner.ps1 -ScanPath . -Image ghcr.io/your-org/security-scanner:1.0.0 -Pull
 ```
 
-### Run specific scans
-
-```shell
-# Gitleaks only (secrets)
-podman compose run --rm gitleaks
-
-# Semgrep only (SAST)
-podman compose run --rm semgrep
-
-# Trivy only (all scans)
-podman compose run --rm trivy
-
-# Trivy vulnerabilities only
-podman compose run --rm trivy-vuln
-
-# Trivy IaC/config only
-podman compose run --rm trivy-config
-
-# Trivy licenses only
-podman compose run --rm trivy-license
-
-# Syft only (SBOM)
-podman compose run --rm syft
-
-# Hadolint only
-podman compose run --rm hadolint
-
-# ShellCheck only
-podman compose run --rm shellcheck
-
-# yamllint only
-podman compose run --rm yamllint
-
-# Trivy image scan only
-$env:IMAGE_REF='ghcr.io/org/app:tag'; podman compose run --rm trivy-image
+```bash
+./run-security-scanner.sh --scan-path . --image ghcr.io/your-org/security-scanner:1.0.0 --pull
 ```
 
-## Output
+## Wrapper Options
 
-Results are saved in the `./output` directory by default (configurable via `OUTPUT_PATH`).
+| Option | Meaning |
+| ------ | ------- |
+| `-ScanPath` / `--scan-path` | Host directory to scan. Defaults to the current directory. |
+| `-OutputPath` / `--output-path` | Host directory for reports. Defaults to a sibling directory outside the scanned tree. |
+| `-Command` / `--command` | Scan command to run. Defaults to `all`. |
+| `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
+| `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
+| `-ImageRef` / `--image-ref` | Image reference to scan when the command is `trivy-image`. |
+| `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. |
+| `-FailOnSeverity` / `--fail-on-severity` | Optional comma-separated override for `FAIL_ON_SEVERITY`. |
+| `-TrivyTimeout` / `--trivy-timeout` | Optional override for the Trivy timeout. |
+| `-AllowRootFallback` / `--allow-root-fallback` | Explicitly opt in to running the container as root with `ALLOW_ROOT_FALLBACK=true`. |
+| `-Pull` / `--pull` | Pull the image before running. |
+| `-VolumeName` / `--volume-name` | Override the persistent Trivy cache volume name. |
+| `-ShowResolvedCommand` / `--show-resolved-command` | Print the generated container runtime command before executing it. |
 
-> Remember to create the output directory on the host if it doesn't exist, and ensure the container user has write permissions to it.
+## Commands
 
-When you scan a project directory, prefer setting `OUTPUT_PATH` to a directory *outside* the scanned tree. Otherwise, generated reports can be picked up by later scans and create false positives.
+| Command | Description |
+| ------- | ----------- |
+| `all` | Run the full scan suite |
+| `gitleaks` | Run secret detection only |
+| `semgrep` | Run Semgrep only |
+| `trivy` | Run all Trivy filesystem scans |
+| `trivy-vuln` | Run dependency vulnerability scanning only |
+| `trivy-config` | Run IaC and configuration scanning only |
+| `trivy-license` | Run license checks only |
+| `syft` | Generate SBOM output only |
+| `hadolint` | Run Hadolint only |
+| `shellcheck` | Run ShellCheck only |
+| `yamllint` | Run yamllint only |
+| `trivy-image` | Scan a container image referenced by `-ImageRef` or `--image-ref` |
 
-> In both Compose and direct-run modes, avoid mounting `/output` to a directory inside the scanned source tree. Keep reports in a sibling or separate directory.
+## Security Defaults
 
-### Generated files
+The wrappers apply the hardened runtime settings on every run:
+
+1. The source directory is mounted read-only at `/workspace`.
+2. The container root filesystem is read-only.
+3. All Linux capabilities are dropped.
+4. `no-new-privileges` is enabled.
+5. Writable runtime state is limited to tmpfs mounts, the output bind mount, and the Trivy cache volume.
+6. Host networking is not enabled.
+7. Host credentials, sockets, and other sensitive mounts are not passed through.
+8. Root fallback is disabled unless explicitly requested.
+
+## Output And Exit Codes
+
+Reports are written to a sibling directory outside the scanned tree by default. This avoids generated findings being picked up by later scans.
+
+### Generated Files
 
 ```text
 output/
@@ -112,9 +149,36 @@ output/
 
 Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `trivy-image_YYYYMMDD_HHMMSS.sarif`, and `trivy-image_YYYYMMDD_HHMMSS.txt`.
 
-## Configuration
+### Summary JSON Example
 
-### Environment variables
+```json
+{
+  "scan_id": "scan_20260323_183000",
+  "timestamp": "2026-03-23T18:30:00+00:00",
+  "scan_directory": "/workspace",
+  "overall_status": "PASSED",
+  "results": {
+    "Gitleaks": "PASSED",
+    "Semgrep": "PASSED",
+    "Trivy-Vuln": "FAILED",
+    "Trivy-Config": "PASSED",
+    "Trivy-License": "PASSED",
+    "Syft": "PASSED",
+    "Hadolint": "SKIPPED"
+  }
+}
+```
+
+### Exit Codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | All scans passed |
+| `1` | At least one scan failed |
+
+## Advanced Configuration
+
+The wrappers expose the most common overrides as CLI parameters. The image still supports environment-variable-based configuration, which is useful if you invoke the container directly.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
@@ -131,127 +195,42 @@ Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `tr
 | `YAMLLINT_FAIL_ON` | `error,warning` | yamllint levels that fail the scan |
 | `IMAGE_REF` | empty | Container image reference used by the optional `trivy-image` command |
 
-### Custom configuration example
-
-```powershell
-$env:SCAN_PATH='D:/path/to/your/project'
-$env:OUTPUT_PATH='D:/path/to/your/reports'
-$env:SKIP_DIRS='node_modules,dist,build,bin,obj'
-$env:FAIL_ON_SEVERITY='CRITICAL'
-$env:TRIVY_TIMEOUT='60m'
-$env:ALLOW_ROOT_FALLBACK='true'
-$env:FORBIDDEN_LICENSES='GPL-3.0,AGPL-3.0'
-$env:SHELLCHECK_SEVERITY='warning'
-$env:YAMLLINT_FAIL_ON='error,warning'
-podman compose run --rm security-scanner
-```
-
-The scanner container runs with stricter defaults:
-
-- non-root user inside the image
-- read-only root filesystem in compose
-- all Linux capabilities dropped
-- `no-new-privileges` enabled
-- writable state isolated to hardened tmpfs paths, the Trivy cache volume, and the explicit output bind mount
-
 If Trivy times out on large repositories, exclude generated output first, especially `.NET` build folders like `bin` and `obj`. Increase `TRIVY_TIMEOUT` only when source-relevant paths still need more time to analyze.
 
-On runtimes that do not permit in-container UID/GID switching (rootless containers), privilege drop fails closed by default. Set `$env:ALLOW_ROOT_FALLBACK=true` only when you explicitly accept root execution for that environment and start the container as root for that run, for example with `$env:ALLOW_ROOT_FALLBACK='true'; podman compose run --user 0:0 --rm security-scanner`.
+On runtimes that do not permit in-container UID and GID switching, privilege drop fails closed by default. Only enable root fallback when you explicitly accept root execution for that environment.
 
-### Compose vs. direct run
+## Develop This Scanner
 
-Use `podman compose` or `docker compose` as the default path when possible. In this repository, Compose is the safer and more convenient wrapper because it already applies the hardened runtime settings used by the scanner: read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, tmpfs mounts for writable transient paths, the output bind mount, and the persistent Trivy cache volume.
+Use Compose when working inside this repository. Compose is the canonical maintainer workflow because it captures the hardened runtime settings used by the scanner: read-only root filesystem, dropped capabilities, `no-new-privileges`, tmpfs mounts, output bind mount, and persistent Trivy cache volume.
 
-> Direct `podman run` or `docker run` is fully supported, but it is a lower-level interface. If you use it, *you are responsible for reproducing the same security controls and writable mounts yourself*.
-
-## Direct Podman usage
+### Build The Image
 
 ```powershell
-# Build
 podman build --format docker -t localhost/security-scanner:latest .
-
-# Create the persistent Trivy cache volume once
-podman volume exists security-scanner-trivy-cache 2>$null
-if ($LASTEXITCODE -ne 0) { podman volume create security-scanner-trivy-cache | Out-Null }
-
-# Run all scans with the same hardening used by compose
-$scanPath = 'D:/path/to/scan'
-$outputPath = 'D:/path/to/output'
-$workspaceMount = "type=bind,src=$scanPath,dst=/workspace,readonly"
-$outputMount = "type=bind,src=$outputPath,dst=/output"
-$cacheMount = 'type=volume,src=security-scanner-trivy-cache,dst=/var/lib/trivy'
-podman run --rm --init --read-only `
-  --cap-drop=ALL `
-  --security-opt no-new-privileges:true `
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
-  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
-  --mount $workspaceMount `
-  --mount $outputMount `
-  --mount $cacheMount `
-  --env SCAN_DIR=/workspace `
-  --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
-  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
-  --env TRIVY_TIMEOUT=30m `
-  --env ALLOW_ROOT_FALLBACK=false `
-  --env SHELLCHECK_SEVERITY=warning `
-  --env YAMLLINT_FAIL_ON=error,warning `
-  --env CONFIG_FILE=/app/config.yml `
-  localhost/security-scanner:latest all
-
-# Run a specific scan
-podman run --rm --init --read-only `
-  --cap-drop=ALL `
-  --security-opt no-new-privileges:true `
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
-  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
-  --mount $workspaceMount `
-  --mount $outputMount `
-  --mount $cacheMount `
-  --env SCAN_DIR=/workspace `
-  --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
-  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
-  --env TRIVY_TIMEOUT=30m `
-  --env ALLOW_ROOT_FALLBACK=false `
-  --env SHELLCHECK_SEVERITY=warning `
-  --env YAMLLINT_FAIL_ON=error,warning `
-  --env CONFIG_FILE=/app/config.yml `
-  localhost/security-scanner:latest gitleaks
-
-# Run an optional container image scan
-$imageRef = 'ghcr.io/org/app:tag'
-podman run --rm --init --read-only `
-  --cap-drop=ALL `
-  --security-opt no-new-privileges:true `
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
-  --tmpfs /run:rw,noexec,nosuid,nodev,size=16m,mode=755 `
-  --mount $outputMount `
-  --mount $cacheMount `
-  --env OUTPUT_DIR=/output `
-  --env TRIVY_TIMEOUT=30m `
-  --env IMAGE_REF=$imageRef `
-  --env ALLOW_ROOT_FALLBACK=false `
-  --env CONFIG_FILE=/app/config.yml `
-  localhost/security-scanner:latest trivy-image
+docker build -t localhost/security-scanner:latest .
 ```
 
-## Direct Docker usage
+### Run With Compose
 
 ```powershell
-# Build
-docker build -t localhost/security-scanner:latest .
+$env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
+$env:SCAN_PATH='D:/path/to/your/project'; $env:OUTPUT_PATH='D:/path/to/security-scan-output'; podman compose run --rm security-scanner
+$env:IMAGE_REF='ghcr.io/org/app:tag'; podman compose run --rm trivy-image
+```
 
-# Create the persistent Trivy cache volume once
-docker volume inspect security-scanner-trivy-cache *> $null
-if ($LASTEXITCODE -ne 0) { docker volume create security-scanner-trivy-cache | Out-Null }
+Compose is defined in `docker-compose.yml` and should remain the source of truth for the hardened runtime in this repository.
 
+### Direct Runtime Equivalents
+
+If you need to debug the wrapper behavior or run the image without Compose, use direct `podman run` or `docker run` and reproduce the same hardening flags explicitly.
+
+```powershell
 $scanPath = 'D:/path/to/scan'
 $outputPath = 'D:/path/to/output'
 $workspaceMount = "type=bind,src=$scanPath,dst=/workspace,readonly"
 $outputMount = "type=bind,src=$outputPath,dst=/output"
 $cacheMount = 'type=volume,src=security-scanner-trivy-cache,dst=/var/lib/trivy'
-docker run --rm --init --read-only `
+podman run --rm --init --read-only `
   --cap-drop=ALL `
   --security-opt no-new-privileges:true `
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 `
@@ -261,46 +240,20 @@ docker run --rm --init --read-only `
   --mount $cacheMount `
   --env SCAN_DIR=/workspace `
   --env OUTPUT_DIR=/output `
-  --env SKIP_DIRS=node_modules,vendor,bin,obj,.terraform,dist,build,target,.venv,venv,__pycache__,.gradle,Pods `
-  --env FAIL_ON_SEVERITY=CRITICAL,HIGH `
-  --env TRIVY_TIMEOUT=30m `
-  --env ALLOW_ROOT_FALLBACK=false `
-  --env SHELLCHECK_SEVERITY=warning `
-  --env YAMLLINT_FAIL_ON=error,warning `
   --env CONFIG_FILE=/app/config.yml `
   localhost/security-scanner:latest all
 ```
 
-When using direct container invocations, keep the output directory outside the scanned source tree. In PowerShell, passing the mount specification through variables avoids quoting issues with `--mount`. If you explicitly need root execution because your runtime cannot drop privileges inside the container, add `--user 0:0` and set `ALLOW_ROOT_FALLBACK=true` for that run.
+## Repository Layout
 
-## Output Format
-
-### Summary JSON
-
-```json
-{
-    "scan_id": "scan_20260323_183000",
-    "timestamp": "2026-03-23T18:30:00+00:00",
-    "scan_directory": "/workspace",
-    "overall_status": "PASSED",
-    "results": {
-        "Gitleaks": "PASSED",
-        "Semgrep": "PASSED",
-        "Trivy-Vuln": "FAILED",
-        "Trivy-Config": "PASSED",
-        "Trivy-License": "PASSED",
-        "Syft": "PASSED",
-        "Hadolint": "SKIPPED"
-    }
-}
-```
-
-### Exit Codes
-
-| Code | Meaning |
+| Path | Purpose |
 | ---- | ------- |
-| `0` | All scans passed |
-| `1` | At least one scan failed |
+| `Dockerfile` | Builds the scanner image |
+| `entrypoint.sh` | Implements scan orchestration inside the container |
+| `config.yml` | Default scanner configuration |
+| `docker-compose.yml` | Maintainer-oriented hardened runtime definition |
+| `run-security-scanner.ps1` | PowerShell consumer wrapper |
+| `run-security-scanner.sh` | Bash consumer wrapper |
 
 ## Contribution
 
