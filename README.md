@@ -77,6 +77,7 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 | ------ | ------- |
 | `-ScanPath` / `--scan-path` | Host directory to scan. Defaults to the current directory. |
 | `-OutputPath` / `--output-path` | Host directory for reports. Defaults to a sibling directory outside the scanned tree. |
+| `-ConfigPath` / `--config-path` | Optional path to an external scanner config file. When set, the file is mounted read-only and used instead of the image default config. |
 | `-Command` / `--command` | Scan command to run. Defaults to `all`. |
 | `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
 | `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
@@ -179,6 +180,8 @@ Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `tr
 ## Advanced Configuration
 
 The wrappers expose the most common overrides as CLI parameters. The image still supports environment-variable-based configuration, which is useful if you invoke the container directly.
+
+You can also point either wrapper at a config file outside this repository with `-ConfigPath` or `--config-path`. This is the supported way to reuse the scanner image from another source repository while keeping repo-specific scan policy in that external repository.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |

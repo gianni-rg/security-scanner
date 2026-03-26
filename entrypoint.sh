@@ -114,26 +114,67 @@ build_skip_args() {
     target_array=("${skip_args[@]}")
 }
 
+append_unique_value() {
+    local array_name=$1
+    local value=$2
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local existing
+
+    [ -z "$value" ] && return
+
+    for existing in "${target_array[@]}"; do
+        if [ "$existing" = "$value" ]; then
+            return
+        fi
+    done
+
+    target_array+=("$value")
+}
+
 append_find_skip_group() {
     local array_name=$1
     local pattern=$2
     # shellcheck disable=SC2178
     local -n target_array="$array_name"
+    local normalized
+    local basename_pattern
 
     [ -z "$pattern" ] && return
+
+    normalized="$pattern"
+    while [ "${normalized#./}" != "$normalized" ]; do
+        normalized="${normalized#./}"
+    done
+    while [ "${normalized#\*\*/}" != "$normalized" ]; do
+        normalized="${normalized#\*\*/}"
+    done
+    normalized="${normalized%/}"
+    normalized="${normalized%/*}"
+    if [ -z "$normalized" ]; then
+        normalized="$pattern"
+        while [ "${normalized#./}" != "$normalized" ]; do
+            normalized="${normalized#./}"
+        done
+        while [ "${normalized#\*\*/}" != "$normalized" ]; do
+            normalized="${normalized#\*\*/}"
+        done
+        normalized="${normalized%/}"
+    fi
+
+    basename_pattern="$(basename "$normalized")"
+    [ -z "$basename_pattern" ] && return
 
     if [ "${#target_array[@]}" -gt 0 ]; then
         target_array+=(-o)
     fi
 
-    target_array+=(
-        -path "./${pattern}"
-        -o -path "./${pattern}/*"
-        -o -path "${pattern}"
-        -o -path "${pattern}/*"
-        -o -path "*/${pattern}"
-        -o -path "*/${pattern}/*"
-    )
+    if [[ "$normalized" == */* ]]; then
+        target_array+=( -path "./${normalized}" -o -path "./${normalized}/*" )
+        return
+    fi
+
+    target_array+=( -name "$basename_pattern" )
 }
 
 build_find_prune_args() {
@@ -141,24 +182,12 @@ build_find_prune_args() {
     # shellcheck disable=SC2178
     local -n target_array="$array_name"
     local item
-    local normalized
-    local without_globstar
 
     target_array=()
 
     for item in "${SKIP_DIR_ARRAY[@]}"; do
         [ -z "$item" ] && continue
         append_find_skip_group "$array_name" "$item"
-
-        normalized="${item#./}"
-        if [ "$normalized" != "$item" ]; then
-            append_find_skip_group "$array_name" "$normalized"
-        fi
-
-        without_globstar="${normalized#\*\*/}"
-        if [ "$without_globstar" != "$normalized" ]; then
-            append_find_skip_group "$array_name" "$without_globstar"
-        fi
     done
 }
 
@@ -187,6 +216,35 @@ build_syft_exclude_args() {
     done
 }
 
+build_trivy_skip_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a prune_args=()
+    local -a expanded_dirs=()
+    local path
+    local normalized
+
+    target_array=()
+    build_find_prune_args prune_args
+
+    if [ "${#prune_args[@]}" -gt 0 ]; then
+        while IFS= read -r -d '' path; do
+            normalized="${path#./}"
+            append_unique_value expanded_dirs "$normalized"
+        done < <(find . -type d \( "${prune_args[@]}" \) -print0 2>/dev/null)
+    fi
+
+    if [ "${#expanded_dirs[@]}" -eq 0 ]; then
+        build_skip_args --skip-dirs target_array
+        return
+    fi
+
+    for normalized in "${expanded_dirs[@]}"; do
+        target_array+=(--skip-dirs "$normalized")
+    done
+}
+
 find_files_with_prune() {
     local array_name=$1
     shift
@@ -208,6 +266,81 @@ find_files_with_prune() {
     while IFS= read -r -d '' path; do
         target_array+=("$path")
     done < <(find . "$@" -print0)
+}
+
+merge_trivy_fs_reports() {
+    local output_file=$1
+    shift
+
+    if [ "$#" -eq 0 ]; then
+        printf '{"SchemaVersion":2,"ArtifactName":"%s","ArtifactType":"filesystem","Results":[]}' "${SCAN_DIR}" > "$output_file"
+        return
+    fi
+
+    jq -s --arg artifact_name "${SCAN_DIR}" '
+        reduce .[] as $item (
+            {
+                SchemaVersion: 2,
+                ArtifactName: $artifact_name,
+                ArtifactType: "filesystem",
+                Results: []
+            };
+            .Results += ($item.Results // [])
+        )
+    ' "$@" > "$output_file"
+}
+
+append_unique_target() {
+    local array_name=$1
+    local value=$2
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local existing
+
+    [ -z "$value" ] && return
+
+    for existing in "${target_array[@]}"; do
+        if [ "$existing" = "$value" ]; then
+            return
+        fi
+    done
+
+    target_array+=("$value")
+}
+
+collect_trivy_config_targets() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a terraform_files=()
+    local -a docker_related_files=()
+    local -a chart_files=()
+    local -a yaml_files=()
+    local target
+
+    target_array=()
+
+    find_files_with_prune terraform_files -type f \( -name "*.tf" -o -name "*.tf.json" \)
+    for target in "${terraform_files[@]}"; do
+        append_unique_target "$array_name" "$target"
+    done
+
+    find_files_with_prune docker_related_files -type f \( -name "Dockerfile*" -o -name "*.dockerfile" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" \)
+    for target in "${docker_related_files[@]}"; do
+        append_unique_target "$array_name" "$target"
+    done
+
+    find_files_with_prune chart_files -type f -name "Chart.yaml"
+    for target in "${chart_files[@]}"; do
+        append_unique_target "$array_name" "$(dirname "$target")"
+    done
+
+    find_files_with_prune yaml_files -type f \( -name "*.yaml" -o -name "*.yml" \)
+    for target in "${yaml_files[@]}"; do
+        if grep -E -q -m 1 '^(apiVersion|kind|AWSTemplateFormatVersion|Resources|hosts|tasks):' "${target}" 2>/dev/null; then
+            append_unique_target "$array_name" "$target"
+        fi
+    done
 }
 
 convert_trivy_report() {
@@ -587,7 +720,7 @@ run_trivy_vuln() {
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
     # JSON output
     run_as_scanner trivy fs \
@@ -637,51 +770,58 @@ run_trivy_config() {
     local output_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.json"
     local table_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.txt"
     local -a skip_args=()
-    local -a terraform_files=()
-    local -a docker_related_files=()
-    local -a yaml_files=()
+    local -a config_targets=()
+    local -a temp_reports=()
     local trivy_json_exit=0
     local trivy_table_exit=0
-    local yaml_file
+    local temp_dir
+    local target
+    local target_name
+    local temp_report
+    local scan_exit
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
-    # Check if IaC files exist
-    local has_iac="false"
-    find_files_with_prune terraform_files -type f -name "*.tf"
-    if [ "${#terraform_files[@]}" -gt 0 ]; then has_iac="true"; fi
+    collect_trivy_config_targets config_targets
 
-    if [ "${has_iac}" = "false" ]; then
-        find_files_with_prune docker_related_files -type f \( -name "Dockerfile*" -o -name "*.dockerfile" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" \)
-        if [ "${#docker_related_files[@]}" -gt 0 ]; then has_iac="true"; fi
-    fi
-
-    if [ "${has_iac}" = "false" ]; then
-        find_files_with_prune yaml_files -type f \( -name "*.yaml" -o -name "*.yml" \)
-        for yaml_file in "${yaml_files[@]}"; do
-            if grep -q -m 1 "apiVersion:" "${yaml_file}" 2>/dev/null; then
-                has_iac="true"
-                break
-            fi
-        done
-    fi
-
-    if [ "${has_iac}" = "false" ]; then
+    if [ "${#config_targets[@]}" -eq 0 ]; then
         log_result "Trivy-Config" "SKIPPED" "No IaC files found"
         return
     fi
 
-    # JSON output
-    run_as_scanner trivy fs \
-        --scanners misconfig \
-        --format json \
-        --output "${output_file}" \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 || trivy_json_exit=$?
+    temp_dir=$(mktemp -d)
+
+    for target in "${config_targets[@]}"; do
+        target_name=$(echo "${target#./}" | tr '/\\:' '___')
+        temp_report="${temp_dir}/${target_name}.json"
+        scan_exit=0
+
+        run_as_scanner trivy fs \
+            --scanners misconfig \
+            --format json \
+            --output "${temp_report}" \
+            "${skip_args[@]}" \
+            --timeout "${TRIVY_TIMEOUT}" \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            "${target}" 2>&1 || scan_exit=$?
+
+        if ! ensure_valid_json_report "${temp_report}"; then
+            trivy_json_exit=${scan_exit:-1}
+            rm -rf "${temp_dir}"
+            log_result "Trivy-Config" "FAILED" "Execution failed while scanning ${target}"
+            return
+        fi
+
+        temp_reports+=("${temp_report}")
+        if [ "$scan_exit" -ne 0 ]; then
+            trivy_json_exit=$scan_exit
+        fi
+    done
+
+    merge_trivy_fs_reports "${output_file}" "${temp_reports[@]}"
+    rm -rf "${temp_dir}"
 
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Config" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
@@ -730,7 +870,7 @@ run_trivy_license() {
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
     # JSON output
     run_as_scanner trivy fs \
