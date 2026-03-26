@@ -9,21 +9,45 @@
 general:
   # Directories to skip during scanning
   skip_dirs:
-    - node_modules
-    - vendor
-    - bin
-    - obj
-    - .terraform
-    - dist
-    - build
-    - target
-    - .venv
-    - venv
-    - __pycache__
-    - .gradle
-    - Pods
-    - .git
-    - legacy
+    # Recursive dependency trees
+    - "**/node_modules"
+    - "**/.venv"
+    - "**/venv"
+
+    # Python / build cache
+    - "**/__pycache__"
+    - "**/.pytest_cache"
+    - "**/.ruff_cache"
+    - "**/.mypy_cache"
+
+    # JS / frontend build outputs
+    - "**/.next"
+    - "**/.turbo"
+    - "**/dist"
+    - "**/build"
+    - "**/coverage"
+
+    # .NET / compiled outputs
+    - "**/bin"
+    - "**/obj"
+    - "**/Debug"
+    - "**/Release"
+    - "**/x64"
+    - "**/x86"
+
+    # Infra / mobile / package-manager artifacts
+    - "**/.terraform"
+    - "**/.gradle"
+    - "**/Pods"
+    - "**/target"
+
+    # VCS / editor / local outputs
+    - "**/.git"
+    - "**/.idea"
+    - "**/.vscode"
+    - "**/tmp"
+    - "**/logs"
+    - "**/security-reports"
 
 # Gitleaks Configuration
 gitleaks:

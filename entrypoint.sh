@@ -114,6 +114,113 @@ build_skip_args() {
     target_array=("${skip_args[@]}")
 }
 
+append_find_skip_group() {
+    local array_name=$1
+    local pattern=$2
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+
+    [ -z "$pattern" ] && return
+
+    if [ "${#target_array[@]}" -gt 0 ]; then
+        target_array+=(-o)
+    fi
+
+    target_array+=(
+        -path "./${pattern}"
+        -o -path "./${pattern}/*"
+        -o -path "${pattern}"
+        -o -path "${pattern}/*"
+        -o -path "*/${pattern}"
+        -o -path "*/${pattern}/*"
+    )
+}
+
+build_find_prune_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local item
+    local normalized
+    local without_globstar
+
+    target_array=()
+
+    for item in "${SKIP_DIR_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        append_find_skip_group "$array_name" "$item"
+
+        normalized="${item#./}"
+        if [ "$normalized" != "$item" ]; then
+            append_find_skip_group "$array_name" "$normalized"
+        fi
+
+        without_globstar="${normalized#\*\*/}"
+        if [ "$without_globstar" != "$normalized" ]; then
+            append_find_skip_group "$array_name" "$without_globstar"
+        fi
+    done
+}
+
+build_syft_exclude_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local item
+    local normalized
+
+    target_array=()
+
+    for item in "${SKIP_DIR_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        normalized="${item#./}"
+
+        case "$normalized" in
+            ./*|\*/*|\*\*/*)
+                ;;
+            *)
+                normalized="**/${normalized}"
+                ;;
+        esac
+
+        target_array+=(--exclude "$normalized")
+    done
+}
+
+find_files_with_prune() {
+    local array_name=$1
+    shift
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a prune_args=()
+    local path
+
+    target_array=()
+    build_find_prune_args prune_args
+
+    if [ "${#prune_args[@]}" -gt 0 ]; then
+        while IFS= read -r -d '' path; do
+            target_array+=("$path")
+        done < <(find . \( "${prune_args[@]}" \) -prune -o "$@" -print0)
+        return
+    fi
+
+    while IFS= read -r -d '' path; do
+        target_array+=("$path")
+    done < <(find . "$@" -print0)
+}
+
+convert_trivy_report() {
+    local input_file=$1
+    local format=$2
+    local output_file=$3
+
+    run_as_scanner trivy convert \
+        --format "$format" \
+        --output "$output_file" \
+        "$input_file"
+}
+
 path_is_skipped() {
     local path=$1
     local item
@@ -492,29 +599,13 @@ run_trivy_vuln() {
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_json_exit=$?
 
-    # SARIF output
-    run_as_scanner trivy fs \
-        --scanners vuln \
-        --format sarif \
-        --output "${sarif_file}" \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 || trivy_sarif_exit=$?
-
-    # Table output for human readability
-    run_as_scanner trivy fs \
-        --scanners vuln \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Vuln" "FAILED" "Execution failed (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || trivy_sarif_exit=$?
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
@@ -546,8 +637,12 @@ run_trivy_config() {
     local output_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.json"
     local table_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.txt"
     local -a skip_args=()
+    local -a terraform_files=()
+    local -a docker_related_files=()
+    local -a yaml_files=()
     local trivy_json_exit=0
     local trivy_table_exit=0
+    local yaml_file
 
     cd "${SCAN_DIR}"
 
@@ -555,10 +650,23 @@ run_trivy_config() {
 
     # Check if IaC files exist
     local has_iac="false"
-    if find . -name "*.tf" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . -name "Dockerfile*" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l -m 1 "apiVersion:" {} + 2>/dev/null | head -1 | grep -q . 2>/dev/null; then has_iac="true"; fi
+    find_files_with_prune terraform_files -type f -name "*.tf"
+    if [ "${#terraform_files[@]}" -gt 0 ]; then has_iac="true"; fi
+
+    if [ "${has_iac}" = "false" ]; then
+        find_files_with_prune docker_related_files -type f \( -name "Dockerfile*" -o -name "*.dockerfile" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" \)
+        if [ "${#docker_related_files[@]}" -gt 0 ]; then has_iac="true"; fi
+    fi
+
+    if [ "${has_iac}" = "false" ]; then
+        find_files_with_prune yaml_files -type f \( -name "*.yaml" -o -name "*.yml" \)
+        for yaml_file in "${yaml_files[@]}"; do
+            if grep -q -m 1 "apiVersion:" "${yaml_file}" 2>/dev/null; then
+                has_iac="true"
+                break
+            fi
+        done
+    fi
 
     if [ "${has_iac}" = "false" ]; then
         log_result "Trivy-Config" "SKIPPED" "No IaC files found"
@@ -575,19 +683,12 @@ run_trivy_config() {
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_json_exit=$?
 
-    # Table output
-    run_as_scanner trivy fs \
-        --scanners misconfig \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Config" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
@@ -640,18 +741,12 @@ run_trivy_license() {
         --timeout "${TRIVY_TIMEOUT}" \
         . 2>&1 || trivy_json_exit=$?
 
-    # Table output
-    run_as_scanner trivy fs \
-        --scanners license \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-License" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
 
     # Count licenses
     if [ -f "${output_file}" ]; then
@@ -876,23 +971,13 @@ run_trivy_image() {
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
 
-    run_as_scanner trivy image \
-        --format sarif \
-        --output "${sarif_file}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        "${IMAGE_REF}" 2>&1 || trivy_sarif_exit=$?
-
-    run_as_scanner trivy image \
-        --format table \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        "${IMAGE_REF}" 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Image" "FAILED" "Execution failed for ${IMAGE_REF} (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || trivy_sarif_exit=$?
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
 
     local critical
     local high
@@ -919,28 +1004,31 @@ run_syft() {
     local spdx_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.spdx.json"
     local cyclonedx_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.cyclonedx.json"
     local table_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.txt"
+    local -a exclude_args=()
     local source_name
+    local syft_exit=0
 
     cd "${SCAN_DIR}"
     source_name="$(basename "$(pwd)")"
+    build_syft_exclude_args exclude_args
 
-    # SPDX format
     run_as_scanner syft scan . \
         --source-name "${source_name}" \
         --output spdx-json="${spdx_file}" \
-        2>&1 || true
-
-    # CycloneDX format
-    run_as_scanner syft scan . \
-        --source-name "${source_name}" \
         --output cyclonedx-json="${cyclonedx_file}" \
-        2>&1 || true
+        --output syft-table="${table_file}" \
+        "${exclude_args[@]}" \
+        2>&1 || syft_exit=$?
 
-    # Table format for readability
-    run_as_scanner syft scan . \
-        --source-name "${source_name}" \
-        --output table \
-        2>&1 | tee "${table_file}" || true
+    if [ "${syft_exit}" -ne 0 ]; then
+        log_result "Syft" "FAILED" "Execution failed with exit code ${syft_exit}"
+        return
+    fi
+
+    if ! ensure_valid_json_report "${spdx_file}" || ! ensure_valid_json_report "${cyclonedx_file}"; then
+        log_result "Syft" "FAILED" "Execution completed without valid SBOM JSON output"
+        return
+    fi
 
     # Count packages
     if [ -f "${spdx_file}" ]; then
@@ -974,11 +1062,7 @@ run_hadolint() {
     done
 
     # Find Dockerfiles
-    while IFS= read -r -d '' dockerfile; do
-        if ! path_is_skipped "$dockerfile"; then
-            dockerfiles+=("$dockerfile")
-        fi
-    done < <(find . -type f \( -name "Dockerfile*" -o -name "*.dockerfile" \) -print0)
+    find_files_with_prune dockerfiles -type f \( -name "Dockerfile*" -o -name "*.dockerfile" \)
 
     if [ "${#dockerfiles[@]}" -eq 0 ]; then
         log_result "Hadolint" "SKIPPED" "No Dockerfiles found"
@@ -1048,11 +1132,7 @@ run_shellcheck() {
 
     cd "${SCAN_DIR}"
 
-    while IFS= read -r -d '' shell_file; do
-        if ! path_is_skipped "$shell_file"; then
-            shell_files+=("$shell_file")
-        fi
-    done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+    find_files_with_prune shell_files -type f \( -name '*.sh' -o -name '*.bash' \)
 
     if [ "${#shell_files[@]}" -eq 0 ]; then
         log_result "ShellCheck" "SKIPPED" "No shell scripts found"
@@ -1107,11 +1187,7 @@ run_yamllint() {
 
     cd "${SCAN_DIR}"
 
-    while IFS= read -r -d '' yaml_file; do
-        if ! path_is_skipped "$yaml_file"; then
-            yaml_files+=("$yaml_file")
-        fi
-    done < <(find . -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+    find_files_with_prune yaml_files -type f \( -name '*.yml' -o -name '*.yaml' \)
 
     if [ "${#yaml_files[@]}" -eq 0 ]; then
         log_result "yamllint" "SKIPPED" "No YAML files found"
