@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Gianni Rosa Gallina.
+# This script is licensed under the APACHE-2.0 License. See LICENSE file in the project root for full license information.
+# It is part of Security Scanner project. See https://github.com/gianni-rg/security-scanner for more details.
+
 param(
     [string]$ScanPath = '.',
     [string]$OutputPath,
