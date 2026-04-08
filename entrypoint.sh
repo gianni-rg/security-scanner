@@ -697,8 +697,6 @@ run_trivy_vuln() {
     local table_file="${OUTPUT_DIR}/trivy-vuln_${TIMESTAMP}.txt"
     local -a skip_args=()
     local trivy_json_exit=0
-    local trivy_sarif_exit=0
-    local trivy_table_exit=0
 
     cd "${SCAN_DIR}"
 
@@ -715,12 +713,12 @@ run_trivy_vuln() {
         . 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Vuln" "FAILED" "Execution failed (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-Vuln" "FAILED" "Execution failed before report conversion (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || trivy_sarif_exit=$?
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
@@ -755,7 +753,6 @@ run_trivy_config() {
     local -a config_targets=()
     local -a temp_reports=()
     local trivy_json_exit=0
-    local trivy_table_exit=0
     local temp_dir
     local target
     local target_name
@@ -814,11 +811,11 @@ run_trivy_config() {
     cleanup_temp_dir
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Config" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-Config" "FAILED" "Execution failed before table conversion (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
@@ -856,7 +853,6 @@ run_trivy_license() {
     local license_name
     local forbidden_license
     local trivy_json_exit=0
-    local trivy_table_exit=0
 
     cd "${SCAN_DIR}"
 
@@ -872,11 +868,11 @@ run_trivy_license() {
         . 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-License" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-License" "FAILED" "Execution failed before table conversion (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
 
     # Count licenses
     if [ -f "${output_file}" ]; then
@@ -1086,8 +1082,6 @@ run_trivy_image() {
     local sarif_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif"
     local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
     local trivy_json_exit=0
-    local trivy_sarif_exit=0
-    local trivy_table_exit=0
 
     if [ -z "${IMAGE_REF}" ]; then
         log_result "Trivy-Image" "SKIPPED" "IMAGE_REF is not set"
@@ -1102,12 +1096,12 @@ run_trivy_image() {
         "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Image" "FAILED" "Execution failed for ${IMAGE_REF} (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-Image" "FAILED" "Execution failed before report conversion for ${IMAGE_REF} (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || trivy_sarif_exit=$?
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || trivy_table_exit=$?
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
+    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
 
     local critical
     local high

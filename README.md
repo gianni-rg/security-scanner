@@ -82,7 +82,7 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 | `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
 | `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
 | `-ImageRef` / `--image-ref` | Image reference to scan when the command is `trivy-image`. |
-| `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. These excludes are applied to Semgrep, Trivy, Syft, and in-container file discovery. |
+| `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. These exclusions are applied to Semgrep, Trivy, Syft, and in-container file discovery. |
 | `-FailOnSeverity` / `--fail-on-severity` | Optional comma-separated override for `FAIL_ON_SEVERITY`. |
 | `-TrivyTimeout` / `--trivy-timeout` | Optional override for the Trivy timeout. |
 | `-AllowRootFallback` / `--allow-root-fallback` | Explicitly opt in to running the container as root with `ALLOW_ROOT_FALLBACK=true`. |
