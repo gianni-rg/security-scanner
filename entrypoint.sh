@@ -132,49 +132,76 @@ append_unique_value() {
     target_array+=("$value")
 }
 
+normalize_skip_pattern() {
+    local pattern=$1
+
+    while [ "${pattern#./}" != "$pattern" ]; do
+        pattern="${pattern#./}"
+    done
+
+    while [ "${pattern%/}" != "$pattern" ]; do
+        pattern="${pattern%/}"
+    done
+
+    printf '%s\n' "$pattern"
+}
+
+build_skip_match_pattern() {
+    local pattern=$1
+    local normalized
+
+    normalized=$(normalize_skip_pattern "$pattern")
+    [ -z "$normalized" ] && return
+
+    case "$pattern" in
+        ./*)
+            printf './%s\n' "$normalized"
+            ;;
+        */*)
+            case "$normalized" in
+                \*/*|\*\*/*)
+                    printf '%s\n' "$normalized"
+                    ;;
+                *)
+                    printf '*/%s\n' "$normalized"
+                    ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' "$normalized"
+            ;;
+    esac
+}
+
 append_find_skip_group() {
     local array_name=$1
     local pattern=$2
     # shellcheck disable=SC2178
     local -n target_array="$array_name"
     local normalized
-    local basename_pattern
+    local match_pattern
 
     [ -z "$pattern" ] && return
 
-    normalized="$pattern"
-    while [ "${normalized#./}" != "$normalized" ]; do
-        normalized="${normalized#./}"
-    done
-    while [ "${normalized#\*\*/}" != "$normalized" ]; do
-        normalized="${normalized#\*\*/}"
-    done
-    normalized="${normalized%/}"
-    normalized="${normalized%/*}"
-    if [ -z "$normalized" ]; then
-        normalized="$pattern"
-        while [ "${normalized#./}" != "$normalized" ]; do
-            normalized="${normalized#./}"
-        done
-        while [ "${normalized#\*\*/}" != "$normalized" ]; do
-            normalized="${normalized#\*\*/}"
-        done
-        normalized="${normalized%/}"
-    fi
-
-    basename_pattern="$(basename "$normalized")"
-    [ -z "$basename_pattern" ] && return
+    normalized=$(normalize_skip_pattern "$pattern")
+    [ -z "$normalized" ] && return
 
     if [ "${#target_array[@]}" -gt 0 ]; then
         target_array+=(-o)
     fi
 
-    if [[ "$normalized" == */* ]]; then
-        target_array+=( -path "./${normalized}" -o -path "./${normalized}/*" )
-        return
-    fi
-
-    target_array+=( -name "$basename_pattern" )
+    case "$pattern" in
+        ./*)
+            target_array+=( -path "./${normalized}" -o -path "./${normalized}/*" )
+            ;;
+        */*)
+            match_pattern=$(build_skip_match_pattern "$pattern")
+            target_array+=( -path "$match_pattern" -o -path "${match_pattern}/*" )
+            ;;
+        *)
+            target_array+=( -name "$normalized" )
+            ;;
+    esac
 }
 
 build_find_prune_args() {
@@ -202,10 +229,14 @@ build_syft_exclude_args() {
 
     for item in "${SKIP_DIR_ARRAY[@]}"; do
         [ -z "$item" ] && continue
-        normalized="${item#./}"
+        normalized=$(normalize_skip_pattern "$item")
 
-        case "$normalized" in
+        case "$item" in
             ./*|\*/*|\*\*/*)
+                normalized="$item"
+                while [ "${normalized%/}" != "$normalized" ]; do
+                    normalized="${normalized%/}"
+                done
                 ;;
             *)
                 normalized="**/${normalized}"
@@ -339,11 +370,36 @@ convert_trivy_report() {
 path_is_skipped() {
     local path=$1
     local item
+    local match_pattern
+
+    case "$path" in
+        ./*)
+            ;;
+        *)
+            path="./${path}"
+            ;;
+    esac
+
     for item in "${SKIP_DIR_ARRAY[@]}"; do
         [ -z "$item" ] && continue
-        case "$path" in
-            "./${item}"|"./${item}/"*|*/"${item}"|*/"${item}/"*)
-                return 0
+
+        match_pattern=$(build_skip_match_pattern "$item")
+        [ -z "$match_pattern" ] && continue
+
+        case "$item" in
+            */*)
+                case "$path" in
+                    "$match_pattern"|"$match_pattern/"*)
+                        return 0
+                        ;;
+                esac
+                ;;
+            *)
+                case "$path" in
+                    "./$match_pattern"|"./$match_pattern/"*|*/"$match_pattern"|*/"$match_pattern/"*)
+                        return 0
+                        ;;
+                esac
                 ;;
         esac
     done

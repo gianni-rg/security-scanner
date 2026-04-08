@@ -44,17 +44,34 @@ die() {
     exit 1
 }
 
+is_windows_drive_path() {
+    local path=$1
+    [[ "$path" =~ ^[A-Za-z]:[\\/] ]]
+}
+
+is_posix_path() {
+    local path=$1
+    [[ "$path" == /* ]]
+}
+
 to_host_path() {
     local path=$1
 
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -am "$path"
+    if is_windows_drive_path "$path"; then
+        printf '%s\n' "$path"
         return
     fi
 
-    if command -v wslpath >/dev/null 2>&1; then
-        wslpath -m "$path"
-        return
+    if is_posix_path "$path"; then
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -am "$path"
+            return
+        fi
+
+        if command -v wslpath >/dev/null 2>&1; then
+            wslpath -m "$path"
+            return
+        fi
     fi
 
     printf '%s\n' "$path"
@@ -63,14 +80,21 @@ to_host_path() {
 to_filesystem_path() {
     local path=$1
 
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -u "$path"
+    if is_posix_path "$path"; then
+        printf '%s\n' "$path"
         return
     fi
 
-    if command -v wslpath >/dev/null 2>&1; then
-        wslpath -u "$path"
-        return
+    if is_windows_drive_path "$path"; then
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -u "$path"
+            return
+        fi
+
+        if command -v wslpath >/dev/null 2>&1; then
+            wslpath -u "$path"
+            return
+        fi
     fi
 
     printf '%s\n' "$path"
@@ -139,6 +163,7 @@ resolve_existing_dir() {
 resolve_candidate_path() {
     local path=$1
     local fs_path
+    local dir_name base_name
 
     fs_path=$(to_filesystem_path "$path")
 
@@ -148,11 +173,17 @@ resolve_candidate_path() {
     fi
 
     if [[ -e "$fs_path" ]]; then
-        printf '%s\n' "$fs_path"
+        if [[ -d "$fs_path" ]]; then
+            (cd "$fs_path" && pwd -P)
+            return
+        fi
+
+        dir_name=$(dirname "$fs_path")
+        base_name=$(basename "$fs_path")
+        printf '%s/%s\n' "$(cd "$dir_name" && pwd -P)" "$base_name"
         return
     fi
 
-    local dir_name base_name
     dir_name=$(dirname "$fs_path")
     base_name=$(basename "$fs_path")
 

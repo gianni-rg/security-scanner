@@ -187,7 +187,7 @@ You can also point either wrapper at a config file outside this repository with 
 | -------- | ------- | ----------- |
 | `SCAN_PATH` | `.` | Directory to scan |
 | `OUTPUT_PATH` | `./output` | Results directory |
-| `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude from Semgrep, Trivy, Syft, and entrypoint file discovery. For direct Syft compatibility, prefer patterns starting with `./`, `*/`, or `**/`. |
+| `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude from Semgrep, Trivy, Syft, and entrypoint file discovery. Use `./path` to anchor a rule at the repo root; patterns without `./` are treated as basename or suffix matches. For direct Syft compatibility, prefer patterns starting with `./`, `*/`, or `**/`. |
 | `FAIL_ON_SEVERITY` | `CRITICAL,HIGH` | Severity levels that cause failure |
 | `TRIVY_TIMEOUT` | `30m` | Timeout passed to each Trivy filesystem scan |
 | `ALLOW_ROOT_FALLBACK` | `false` | Explicitly allow root execution if the runtime cannot drop privileges |
