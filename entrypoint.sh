@@ -1312,7 +1312,6 @@ run_yamllint() {
     local report_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.txt"
     local sarif_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.sarif"
     local -a yaml_files=()
-    local yaml_file
     local yamllint_exit=0
 
     cd "${SCAN_DIR}"
