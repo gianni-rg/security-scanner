@@ -114,14 +114,627 @@ build_skip_args() {
     target_array=("${skip_args[@]}")
 }
 
+append_unique_value() {
+    local array_name=$1
+    local value=$2
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local existing
+
+    [ -z "$value" ] && return
+
+    for existing in "${target_array[@]}"; do
+        if [ "$existing" = "$value" ]; then
+            return
+        fi
+    done
+
+    target_array+=("$value")
+}
+
+normalize_skip_pattern() {
+    local pattern=$1
+
+    while [ "${pattern#./}" != "$pattern" ]; do
+        pattern="${pattern#./}"
+    done
+
+    while [ "${pattern%/}" != "$pattern" ]; do
+        pattern="${pattern%/}"
+    done
+
+    printf '%s\n' "$pattern"
+}
+
+build_skip_match_pattern() {
+    local pattern=$1
+    local normalized
+
+    normalized=$(normalize_skip_pattern "$pattern")
+    [ -z "$normalized" ] && return
+
+    case "$pattern" in
+        ./*)
+            printf './%s\n' "$normalized"
+            ;;
+        */*)
+            case "$normalized" in
+                \*/*|\*\*/*)
+                    printf '%s\n' "$normalized"
+                    ;;
+                *)
+                    printf '*/%s\n' "$normalized"
+                    ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' "$normalized"
+            ;;
+    esac
+}
+
+append_find_skip_group() {
+    local array_name=$1
+    local pattern=$2
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local normalized
+    local match_pattern
+
+    [ -z "$pattern" ] && return
+
+    normalized=$(normalize_skip_pattern "$pattern")
+    [ -z "$normalized" ] && return
+
+    if [ "${#target_array[@]}" -gt 0 ]; then
+        target_array+=(-o)
+    fi
+
+    case "$pattern" in
+        ./*)
+            target_array+=( -path "./${normalized}" -o -path "./${normalized}/*" )
+            ;;
+        */*)
+            match_pattern=$(build_skip_match_pattern "$pattern")
+            target_array+=( -path "$match_pattern" -o -path "${match_pattern}/*" )
+            ;;
+        *)
+            target_array+=( -name "$normalized" )
+            ;;
+    esac
+}
+
+build_find_prune_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local item
+
+    target_array=()
+
+    for item in "${SKIP_DIR_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        append_find_skip_group "$array_name" "$item"
+    done
+}
+
+build_syft_exclude_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local item
+    local normalized
+
+    target_array=()
+
+    for item in "${SKIP_DIR_ARRAY[@]}"; do
+        [ -z "$item" ] && continue
+        normalized=$(normalize_skip_pattern "$item")
+
+        case "$item" in
+            ./*|\*/*|\*\*/*)
+                normalized="$item"
+                while [ "${normalized%/}" != "$normalized" ]; do
+                    normalized="${normalized%/}"
+                done
+                ;;
+            *)
+                normalized="**/${normalized}"
+                ;;
+        esac
+
+        target_array+=(--exclude "$normalized")
+    done
+}
+
+build_trivy_skip_args() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a prune_args=()
+    local -a expanded_dirs=()
+    local path
+    local normalized
+
+    target_array=()
+    build_find_prune_args prune_args
+
+    if [ "${#prune_args[@]}" -gt 0 ]; then
+        while IFS= read -r -d '' path; do
+            normalized="${path#./}"
+            append_unique_value expanded_dirs "$normalized"
+        done < <(find . -type d \( "${prune_args[@]}" \) -prune -print0 2>/dev/null)
+    fi
+
+    if [ "${#expanded_dirs[@]}" -eq 0 ]; then
+        build_skip_args --skip-dirs target_array
+        return
+    fi
+
+    for normalized in "${expanded_dirs[@]}"; do
+        target_array+=(--skip-dirs "$normalized")
+    done
+}
+
+find_files_with_prune() {
+    local array_name=$1
+    shift
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a prune_args=()
+    local path
+
+    target_array=()
+    build_find_prune_args prune_args
+
+    if [ "${#prune_args[@]}" -gt 0 ]; then
+        while IFS= read -r -d '' path; do
+            target_array+=("$path")
+        done < <(find . \( "${prune_args[@]}" \) -prune -o "$@" -print0)
+        return
+    fi
+
+    while IFS= read -r -d '' path; do
+        target_array+=("$path")
+    done < <(find . "$@" -print0)
+}
+
+merge_trivy_fs_reports() {
+    local output_file=$1
+    shift
+
+    if [ "$#" -eq 0 ]; then
+        printf '{"SchemaVersion":2,"ArtifactName":"%s","ArtifactType":"filesystem","Results":[]}' "${SCAN_DIR}" > "$output_file"
+        return
+    fi
+
+    jq -s --arg artifact_name "${SCAN_DIR}" '
+        reduce .[] as $item (
+            {
+                SchemaVersion: 2,
+                ArtifactName: $artifact_name,
+                ArtifactType: "filesystem",
+                Results: []
+            };
+            .Results += ($item.Results // [])
+        )
+    ' "$@" > "$output_file"
+}
+
+rewrite_trivy_config_report_targets() {
+    local input_file=$1
+    local scan_target=$2
+
+    python - "$input_file" "$scan_target" <<'PY'
+import json
+import posixpath
+import sys
+
+input_path, scan_target = sys.argv[1:3]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    report = json.load(handle)
+
+normalized_target = scan_target[2:] if scan_target.startswith('./') else scan_target
+normalized_target = normalized_target.rstrip('/') or normalized_target
+scan_basename = posixpath.basename(normalized_target)
+
+for result in report.get('Results') or []:
+    current = (result.get('Target') or '').lstrip('./')
+
+    if not current or current == '.':
+        result['Target'] = normalized_target
+        continue
+
+    if current == normalized_target:
+        result['Target'] = normalized_target
+        continue
+
+    if current == scan_basename:
+        result['Target'] = normalized_target
+        continue
+
+    if normalized_target.endswith('/' + current):
+        result['Target'] = normalized_target
+        continue
+
+    if '/' in current and not current.startswith(normalized_target + '/'):
+        result['Target'] = posixpath.join(normalized_target, current)
+        continue
+
+    if '/' not in current:
+        result['Target'] = posixpath.join(normalized_target, current)
+
+with open(input_path, 'w', encoding='utf-8') as handle:
+    json.dump(report, handle, indent=2)
+    handle.write('\n')
+PY
+}
+
+collect_trivy_config_targets() {
+    local array_name=$1
+    # shellcheck disable=SC2178
+    local -n target_array="$array_name"
+    local -a terraform_files=()
+    local -a docker_related_files=()
+    local -a chart_files=()
+    local -a yaml_files=()
+    local target
+
+    target_array=()
+
+    find_files_with_prune terraform_files -type f \( -name "*.tf" -o -name "*.tf.json" \)
+    for target in "${terraform_files[@]}"; do
+        append_unique_value "$array_name" "$target"
+    done
+
+    find_files_with_prune docker_related_files -type f \( -name "Dockerfile*" -o -name "*.dockerfile" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" \)
+    for target in "${docker_related_files[@]}"; do
+        append_unique_value "$array_name" "$target"
+    done
+
+    find_files_with_prune chart_files -type f -name "Chart.yaml"
+    for target in "${chart_files[@]}"; do
+        append_unique_value "$array_name" "$(dirname "$target")"
+    done
+
+    find_files_with_prune yaml_files -type f \( -name "*.yaml" -o -name "*.yml" \)
+    for target in "${yaml_files[@]}"; do
+        if grep -E -q -m 1 '^(apiVersion|kind|AWSTemplateFormatVersion|Resources|hosts|tasks):' "${target}" 2>/dev/null; then
+            append_unique_value "$array_name" "$target"
+        fi
+    done
+}
+
+convert_trivy_report() {
+    local input_file=$1
+    local format=$2
+    local output_file=$3
+
+    run_as_scanner trivy convert \
+        --format "$format" \
+        --output "$output_file" \
+        "$input_file"
+}
+
+write_trivy_text_report() {
+    local input_file=$1
+    local report_kind=$2
+    local output_file=$3
+
+    python - "$input_file" "$report_kind" "$output_file" <<'PY'
+import json
+import sys
+
+input_path, report_kind, output_path = sys.argv[1:4]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    report = json.load(handle)
+
+results = report.get('Results') or []
+artifact_name = report.get('ArtifactName') or 'unknown'
+
+
+def severity_rank(value: str) -> int:
+    order = {
+        'CRITICAL': 0,
+        'HIGH': 1,
+        'MEDIUM': 2,
+        'LOW': 3,
+        'UNKNOWN': 4,
+    }
+    return order.get((value or 'UNKNOWN').upper(), 5)
+
+
+def trim(value, length):
+    text = '' if value is None else str(value)
+    if len(text) <= length:
+        return text
+    if length <= 3:
+        return text[:length]
+    return text[: length - 3] + '...'
+
+
+def write_table(lines, headers, rows, widths):
+    if not rows:
+        return
+
+    def fmt(row):
+        padded = []
+        for index, cell in enumerate(row):
+            padded.append(trim(cell, widths[index]).ljust(widths[index]))
+        return ' | '.join(padded)
+
+    separator = '-+-'.join('-' * width for width in widths)
+    lines.append(fmt(headers))
+    lines.append(separator)
+    for row in rows:
+        lines.append(fmt(row))
+
+
+def summarize_vulnerabilities(lines):
+    findings = []
+    total_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
+
+    for result in results:
+        for vuln in result.get('Vulnerabilities') or []:
+            severity = (vuln.get('Severity') or 'UNKNOWN').upper()
+            total_by_severity.setdefault(severity, 0)
+            total_by_severity[severity] += 1
+            findings.append(
+                {
+                    'target': result.get('Target') or artifact_name,
+                    'class': result.get('Class') or result.get('Type') or 'library',
+                    'package': vuln.get('PkgName') or '',
+                    'id': vuln.get('VulnerabilityID') or '',
+                    'severity': severity,
+                    'installed': vuln.get('InstalledVersion') or '',
+                    'fixed': vuln.get('FixedVersion') or '',
+                    'title': vuln.get('Title') or '',
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(
+        'Summary: Critical={CRITICAL}, High={HIGH}, Medium={MEDIUM}, Low={LOW}, Unknown={UNKNOWN}'.format(
+            **total_by_severity
+        )
+    )
+    lines.append('')
+
+    if not findings:
+        lines.append('No vulnerabilities found.')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['Package', 'Vulnerability', 'Severity', 'Installed', 'Fixed', 'Title']
+    widths = [24, 18, 8, 16, 16, 54]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], severity_rank(item['severity']), item['package'], item['id'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['package'],
+            finding['id'],
+            finding['severity'],
+            finding['installed'],
+            finding['fixed'],
+            finding['title'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+def summarize_licenses(lines):
+    findings = []
+    total = 0
+
+    for result in results:
+        for license_item in result.get('Licenses') or []:
+            total += 1
+            findings.append(
+                {
+                    'target': result.get('Target') or artifact_name,
+                    'class': result.get('Class') or result.get('Type') or 'license',
+                    'package': license_item.get('PkgName') or '',
+                    'license': license_item.get('Name') or '',
+                    'classification': license_item.get('Classification') or '',
+                    'severity': (license_item.get('Severity') or '').upper(),
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(f'Summary: Licenses={total}')
+    lines.append('')
+
+    if not findings:
+        lines.append('No licenses found.')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['Package', 'License', 'Classification', 'Severity']
+    widths = [34, 20, 16, 8]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], item['package'], item['license'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['package'],
+            finding['license'],
+            finding['classification'],
+            finding['severity'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+def summarize_misconfigurations(lines):
+    findings = []
+    total_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
+    scanned_targets = []
+
+    for result in results:
+        target = result.get('Target') or artifact_name
+        scanned_targets.append((target, result.get('Class') or result.get('Type') or 'config'))
+        for item in result.get('Misconfigurations') or []:
+            severity = (item.get('Severity') or 'UNKNOWN').upper()
+            total_by_severity.setdefault(severity, 0)
+            total_by_severity[severity] += 1
+            findings.append(
+                {
+                    'target': target,
+                    'class': result.get('Class') or result.get('Type') or 'config',
+                    'id': item.get('ID') or '',
+                    'type': item.get('Type') or '',
+                    'severity': severity,
+                    'status': item.get('Status') or '',
+                    'title': item.get('Title') or '',
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(f'Scanned targets: {len(scanned_targets)}')
+    lines.append(
+        'Summary: Critical={CRITICAL}, High={HIGH}, Medium={MEDIUM}, Low={LOW}, Unknown={UNKNOWN}'.format(
+            **total_by_severity
+        )
+    )
+    lines.append('')
+
+    if not findings:
+        lines.append('No misconfigurations found.')
+        if scanned_targets:
+            lines.append('Scanned target list:')
+            for target, target_class in scanned_targets:
+                lines.append(f'- {target} ({target_class})')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['ID', 'Type', 'Severity', 'Status', 'Title']
+    widths = [18, 18, 8, 12, 60]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], severity_rank(item['severity']), item['id'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['id'],
+            finding['type'],
+            finding['severity'],
+            finding['status'],
+            finding['title'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+lines = []
+if report_kind in {'vuln', 'image'}:
+    summarize_vulnerabilities(lines)
+elif report_kind == 'license':
+    summarize_licenses(lines)
+elif report_kind == 'config':
+    summarize_misconfigurations(lines)
+else:
+    lines.append(f'Unsupported report kind: {report_kind}')
+
+with open(output_path, 'w', encoding='utf-8') as handle:
+    handle.write('\n'.join(lines).rstrip() + '\n')
+PY
+}
+
+write_trivy_text_report_best_effort() {
+    local scan_name=$1
+    local input_file=$2
+    local report_kind=$3
+    local output_file=$4
+
+    if ! write_trivy_text_report "$input_file" "$report_kind" "$output_file"; then
+        rm -f "$output_file" 2>/dev/null || true
+        log_warning "$scan_name" "Text report generation failed; continuing with JSON report only"
+    fi
+}
+
 path_is_skipped() {
     local path=$1
     local item
+    local match_pattern
+
+    case "$path" in
+        ./*)
+            ;;
+        *)
+            path="./${path}"
+            ;;
+    esac
+
     for item in "${SKIP_DIR_ARRAY[@]}"; do
         [ -z "$item" ] && continue
-        case "$path" in
-            "./${item}"|"./${item}/"*|*/"${item}"|*/"${item}/"*)
-                return 0
+
+        match_pattern=$(build_skip_match_pattern "$item")
+        [ -z "$match_pattern" ] && continue
+
+        case "$item" in
+            */*)
+                case "$path" in
+                    "$match_pattern"|"$match_pattern/"*)
+                        return 0
+                        ;;
+                esac
+                ;;
+            *)
+                case "$path" in
+                    "./$match_pattern"|"./$match_pattern/"*|*/"$match_pattern"|*/"$match_pattern/"*)
+                        return 0
+                        ;;
+                esac
                 ;;
         esac
     done
@@ -360,6 +973,13 @@ log_result() {
     fi
 }
 
+log_warning() {
+    local scan_name=$1
+    local details=$2
+
+    echo -e "${YELLOW}⚠️ ${scan_name}: WARNING${NC} - ${details}"
+}
+
 # =============================================================================
 # GITLEAKS - Secret Detection
 # =============================================================================
@@ -475,12 +1095,10 @@ run_trivy_vuln() {
     local table_file="${OUTPUT_DIR}/trivy-vuln_${TIMESTAMP}.txt"
     local -a skip_args=()
     local trivy_json_exit=0
-    local trivy_sarif_exit=0
-    local trivy_table_exit=0
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
     # JSON output
     run_as_scanner trivy fs \
@@ -492,29 +1110,13 @@ run_trivy_vuln() {
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         . 2>&1 || trivy_json_exit=$?
 
-    # SARIF output
-    run_as_scanner trivy fs \
-        --scanners vuln \
-        --format sarif \
-        --output "${sarif_file}" \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 || trivy_sarif_exit=$?
-
-    # Table output for human readability
-    run_as_scanner trivy fs \
-        --scanners vuln \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Vuln" "FAILED" "Execution failed (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-Vuln" "FAILED" "Execution failed before report conversion (json=${trivy_json_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
+    write_trivy_text_report_best_effort "Trivy-Vuln" "${output_file}" vuln "${table_file}"
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
@@ -546,48 +1148,78 @@ run_trivy_config() {
     local output_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.json"
     local table_file="${OUTPUT_DIR}/trivy-config_${TIMESTAMP}.txt"
     local -a skip_args=()
+    local -a config_targets=()
+    local -a temp_reports=()
     local trivy_json_exit=0
-    local trivy_table_exit=0
+    local temp_dir
+    local target
+    local target_name
+    local temp_report
+    local scan_exit
+
+    cleanup_temp_dir() {
+        [ -n "${temp_dir:-}" ] && [ -d "${temp_dir}" ] && rm -rf "${temp_dir}"
+    }
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
-    # Check if IaC files exist
-    local has_iac="false"
-    if find . -name "*.tf" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . -name "Dockerfile*" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null | grep -q .; then has_iac="true"; fi
-    if find . \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l -m 1 "apiVersion:" {} + 2>/dev/null | head -1 | grep -q . 2>/dev/null; then has_iac="true"; fi
+    collect_trivy_config_targets config_targets
 
-    if [ "${has_iac}" = "false" ]; then
+    if [ "${#config_targets[@]}" -eq 0 ]; then
         log_result "Trivy-Config" "SKIPPED" "No IaC files found"
         return
     fi
 
-    # JSON output
-    run_as_scanner trivy fs \
-        --scanners misconfig \
-        --format json \
-        --output "${output_file}" \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 || trivy_json_exit=$?
+    temp_dir=$(mktemp -d)
 
-    # Table output
-    run_as_scanner trivy fs \
-        --scanners misconfig \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
+    for target in "${config_targets[@]}"; do
+        target_name=$(printf '%s' "${target#./}" | tr '/\\:' '___')
+        temp_report="${temp_dir}/${target_name}.json"
+        scan_exit=0
 
-    if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Config" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
+        run_as_scanner trivy fs \
+            --scanners misconfig \
+            --format json \
+            --output "${temp_report}" \
+            "${skip_args[@]}" \
+            --timeout "${TRIVY_TIMEOUT}" \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            "${target}" 2>&1 || scan_exit=$?
+
+        if ! ensure_valid_json_report "${temp_report}"; then
+            trivy_json_exit=${scan_exit:-1}
+            cleanup_temp_dir
+            log_result "Trivy-Config" "FAILED" "Execution failed while scanning ${target}"
+            return
+        fi
+
+        if ! rewrite_trivy_config_report_targets "${temp_report}" "${target}"; then
+            cleanup_temp_dir
+            log_result "Trivy-Config" "FAILED" "Execution failed while normalizing results for ${target}"
+            return
+        fi
+
+        temp_reports+=("${temp_report}")
+        if [ "$scan_exit" -ne 0 ]; then
+            trivy_json_exit=$scan_exit
+        fi
+    done
+
+    if ! merge_trivy_fs_reports "${output_file}" "${temp_reports[@]}"; then
+        cleanup_temp_dir
+        log_result "Trivy-Config" "FAILED" "Execution failed while merging scan reports"
         return
     fi
+    cleanup_temp_dir
+
+    if ! ensure_valid_json_report "${output_file}"; then
+        log_result "Trivy-Config" "FAILED" "Execution failed before summary generation (json=${trivy_json_exit})"
+        return
+    fi
+
+    write_trivy_text_report_best_effort "Trivy-Config" "${output_file}" config "${table_file}"
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
@@ -625,11 +1257,10 @@ run_trivy_license() {
     local license_name
     local forbidden_license
     local trivy_json_exit=0
-    local trivy_table_exit=0
 
     cd "${SCAN_DIR}"
 
-    build_skip_args --skip-dirs skip_args
+    build_trivy_skip_args skip_args
 
     # JSON output
     run_as_scanner trivy fs \
@@ -640,18 +1271,12 @@ run_trivy_license() {
         --timeout "${TRIVY_TIMEOUT}" \
         . 2>&1 || trivy_json_exit=$?
 
-    # Table output
-    run_as_scanner trivy fs \
-        --scanners license \
-        --format table \
-        "${skip_args[@]}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        . 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-License" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-License" "FAILED" "Execution failed before summary generation (json=${trivy_json_exit})"
         return
     fi
+
+    write_trivy_text_report_best_effort "Trivy-License" "${output_file}" license "${table_file}"
 
     # Count licenses
     if [ -f "${output_file}" ]; then
@@ -861,8 +1486,6 @@ run_trivy_image() {
     local sarif_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif"
     local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
     local trivy_json_exit=0
-    local trivy_sarif_exit=0
-    local trivy_table_exit=0
 
     if [ -z "${IMAGE_REF}" ]; then
         log_result "Trivy-Image" "SKIPPED" "IMAGE_REF is not set"
@@ -876,23 +1499,13 @@ run_trivy_image() {
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
 
-    run_as_scanner trivy image \
-        --format sarif \
-        --output "${sarif_file}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        "${IMAGE_REF}" 2>&1 || trivy_sarif_exit=$?
-
-    run_as_scanner trivy image \
-        --format table \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        "${IMAGE_REF}" 2>&1 | tee "${table_file}" || trivy_table_exit=$?
-
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Image" "FAILED" "Execution failed for ${IMAGE_REF} (json=${trivy_json_exit}, sarif=${trivy_sarif_exit}, table=${trivy_table_exit})"
+        log_result "Trivy-Image" "FAILED" "Execution failed before report conversion for ${IMAGE_REF} (json=${trivy_json_exit})"
         return
     fi
+
+    convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
+    write_trivy_text_report_best_effort "Trivy-Image" "${output_file}" image "${table_file}"
 
     local critical
     local high
@@ -919,28 +1532,31 @@ run_syft() {
     local spdx_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.spdx.json"
     local cyclonedx_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.cyclonedx.json"
     local table_file="${OUTPUT_DIR}/sbom_${TIMESTAMP}.txt"
+    local -a exclude_args=()
     local source_name
+    local syft_exit=0
 
     cd "${SCAN_DIR}"
     source_name="$(basename "$(pwd)")"
+    build_syft_exclude_args exclude_args
 
-    # SPDX format
     run_as_scanner syft scan . \
         --source-name "${source_name}" \
         --output spdx-json="${spdx_file}" \
-        2>&1 || true
-
-    # CycloneDX format
-    run_as_scanner syft scan . \
-        --source-name "${source_name}" \
         --output cyclonedx-json="${cyclonedx_file}" \
-        2>&1 || true
+        --output syft-table="${table_file}" \
+        "${exclude_args[@]}" \
+        2>&1 || syft_exit=$?
 
-    # Table format for readability
-    run_as_scanner syft scan . \
-        --source-name "${source_name}" \
-        --output table \
-        2>&1 | tee "${table_file}" || true
+    if [ "${syft_exit}" -ne 0 ]; then
+        log_result "Syft" "FAILED" "Execution failed with exit code ${syft_exit}"
+        return
+    fi
+
+    if ! ensure_valid_json_report "${spdx_file}" || ! ensure_valid_json_report "${cyclonedx_file}"; then
+        log_result "Syft" "FAILED" "Execution completed without valid SBOM JSON output"
+        return
+    fi
 
     # Count packages
     if [ -f "${spdx_file}" ]; then
@@ -974,11 +1590,7 @@ run_hadolint() {
     done
 
     # Find Dockerfiles
-    while IFS= read -r -d '' dockerfile; do
-        if ! path_is_skipped "$dockerfile"; then
-            dockerfiles+=("$dockerfile")
-        fi
-    done < <(find . -type f \( -name "Dockerfile*" -o -name "*.dockerfile" \) -print0)
+    find_files_with_prune dockerfiles -type f \( -name "Dockerfile*" -o -name "*.dockerfile" \)
 
     if [ "${#dockerfiles[@]}" -eq 0 ]; then
         log_result "Hadolint" "SKIPPED" "No Dockerfiles found"
@@ -1048,11 +1660,7 @@ run_shellcheck() {
 
     cd "${SCAN_DIR}"
 
-    while IFS= read -r -d '' shell_file; do
-        if ! path_is_skipped "$shell_file"; then
-            shell_files+=("$shell_file")
-        fi
-    done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+    find_files_with_prune shell_files -type f \( -name '*.sh' -o -name '*.bash' \)
 
     if [ "${#shell_files[@]}" -eq 0 ]; then
         log_result "ShellCheck" "SKIPPED" "No shell scripts found"
@@ -1102,16 +1710,11 @@ run_yamllint() {
     local report_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.txt"
     local sarif_file="${OUTPUT_DIR}/yamllint_${TIMESTAMP}.sarif"
     local -a yaml_files=()
-    local yaml_file
     local yamllint_exit=0
 
     cd "${SCAN_DIR}"
 
-    while IFS= read -r -d '' yaml_file; do
-        if ! path_is_skipped "$yaml_file"; then
-            yaml_files+=("$yaml_file")
-        fi
-    done < <(find . -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+    find_files_with_prune yaml_files -type f \( -name '*.yml' -o -name '*.yaml' \)
 
     if [ "${#yaml_files[@]}" -eq 0 ]; then
         log_result "yamllint" "SKIPPED" "No YAML files found"

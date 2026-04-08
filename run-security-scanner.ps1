@@ -1,6 +1,11 @@
+# Copyright (c) 2026 Gianni Rosa Gallina.
+# This script is licensed under the APACHE-2.0 License. See LICENSE file in the project root for full license information.
+# It is part of Security Scanner project. See https://github.com/gianni-rg/security-scanner for more details.
+
 param(
     [string]$ScanPath = '.',
     [string]$OutputPath,
+    [string]$ConfigPath,
     [ValidateSet('all', 'gitleaks', 'semgrep', 'trivy', 'trivy-vuln', 'trivy-config', 'trivy-license', 'syft', 'hadolint', 'shellcheck', 'yamllint', 'trivy-image')]
     [string]$Command = 'all',
     [ValidateSet('auto', 'podman', 'docker')]
@@ -31,7 +36,7 @@ SYNOPSIS
   Run the hardened security-scanner container against a source directory or container image.
 
 USAGE
-  ./$scriptName [-ScanPath <path>] [-OutputPath <path>] [-Command <name>] [-Runtime auto|podman|docker]
+    ./$scriptName [-ScanPath <path>] [-OutputPath <path>] [-ConfigPath <file>] [-Command <name>] [-Runtime auto|podman|docker]
                 [-Image <ref>] [-ImageRef <ref>] [-SkipDirs <csv>] [-FailOnSeverity <csv>]
                 [-TrivyTimeout <duration>] [-AllowRootFallback] [-Pull] [-VolumeName <name>]
                 [-ShowResolvedCommand] [-Help]
@@ -44,6 +49,7 @@ EXAMPLES
   ./$scriptName -ScanPath . -Command all
   ./$scriptName -ScanPath . -Command semgrep
   ./$scriptName -ScanPath D:/src/app -OutputPath D:/scan-results/app
+    ./$scriptName -ScanPath D:/src/app -ConfigPath D:/configs/security-scanner.yml
   ./$scriptName -Command trivy-image -ImageRef ghcr.io/org/app:tag
 
 NOTES
@@ -196,6 +202,14 @@ else {
     Get-DefaultOutputPath -ResolvedScanPath $resolvedScanPath
 }
 
+$resolvedConfigPath = $null
+if ($PSBoundParameters.ContainsKey('ConfigPath')) {
+    $resolvedConfigPath = Resolve-PathStrict -Path $ConfigPath -AllowMissing
+    if (-not (Test-Path -LiteralPath $resolvedConfigPath -PathType Leaf)) {
+        throw "ConfigPath must be an existing file: $ConfigPath"
+    }
+}
+
 if ($Command -ne 'trivy-image' -and (Test-IsSubPath -ParentPath $resolvedScanPath -ChildPath $resolvedOutputPath)) {
     throw "OutputPath must be outside ScanPath to avoid re-scanning generated reports: $resolvedOutputPath"
 }
@@ -219,6 +233,7 @@ Ensure-Volume -RuntimeName $resolvedRuntime -Name $VolumeName
 $scanMount = "type=bind,src=$(Convert-ToMountPath -Path $resolvedScanPath),dst=/workspace,readonly"
 $outputMount = "type=bind,src=$(Convert-ToMountPath -Path $resolvedOutputPath),dst=/output"
 $cacheMount = "type=volume,src=$VolumeName,dst=/var/lib/trivy"
+$configMount = $null
 $allowRootFallbackValue = if ($AllowRootFallback) { 'true' } else { 'false' }
 
 $runArguments = @(
@@ -233,9 +248,16 @@ $runArguments = @(
     '--mount', $outputMount,
     '--mount', $cacheMount,
     '--env', 'OUTPUT_DIR=/output',
-    '--env', 'CONFIG_FILE=/app/config.yml',
     '--env', "ALLOW_ROOT_FALLBACK=$allowRootFallbackValue"
 )
+
+if ($null -ne $resolvedConfigPath) {
+    $configMount = "type=bind,src=$(Convert-ToMountPath -Path $resolvedConfigPath),dst=/run/scanner/config.yml,readonly"
+    $runArguments += @('--mount', $configMount, '--env', 'CONFIG_FILE=/run/scanner/config.yml')
+}
+else {
+    $runArguments += @('--env', 'CONFIG_FILE=/app/config.yml')
+}
 
 if ($AllowRootFallback) {
     $runArguments += @('--user', '0:0')
@@ -275,12 +297,14 @@ else {
     Write-Host ("  ScanPath: {0}" -f $resolvedScanPath)
 }
 Write-Host ("  OutputPath: {0}" -f $resolvedOutputPath)
+Write-Host ("  ConfigPath: {0}" -f $(if ($null -ne $resolvedConfigPath) { $resolvedConfigPath } else { '/app/config.yml (image default)' }))
 Write-Host ("  CacheVolume: {0}" -f $VolumeName)
 Write-Host ("  AllowRootFallback: {0}" -f $allowRootFallbackValue)
 
 if ($ShowResolvedCommand) {
     Write-Host 'Resolved command'
-    Write-Host (Format-ResolvedCommand -Arguments @($resolvedRuntime) + $runArguments)
+    $resolvedCommand = @($resolvedRuntime) + $runArguments
+    Write-Host (Format-ResolvedCommand -Arguments $resolvedCommand)
 }
 
 & $resolvedRuntime @runArguments

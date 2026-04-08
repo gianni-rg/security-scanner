@@ -77,11 +77,12 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 | ------ | ------- |
 | `-ScanPath` / `--scan-path` | Host directory to scan. Defaults to the current directory. |
 | `-OutputPath` / `--output-path` | Host directory for reports. Defaults to a sibling directory outside the scanned tree. |
+| `-ConfigPath` / `--config-path` | Optional path to an external scanner config file. When set, the file is mounted read-only and used instead of the image default config. |
 | `-Command` / `--command` | Scan command to run. Defaults to `all`. |
 | `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
 | `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
 | `-ImageRef` / `--image-ref` | Image reference to scan when the command is `trivy-image`. |
-| `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. |
+| `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. These exclusions are applied to Semgrep, Trivy, Syft, and in-container file discovery. |
 | `-FailOnSeverity` / `--fail-on-severity` | Optional comma-separated override for `FAIL_ON_SEVERITY`. |
 | `-TrivyTimeout` / `--trivy-timeout` | Optional override for the Trivy timeout. |
 | `-AllowRootFallback` / `--allow-root-fallback` | Explicitly opt in to running the container as root with `ALLOW_ROOT_FALLBACK=true`. |
@@ -149,6 +150,8 @@ output/
 
 Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `trivy-image_YYYYMMDD_HHMMSS.sarif`, and `trivy-image_YYYYMMDD_HHMMSS.txt`.
 
+Trivy `.txt` artifacts are generated from the JSON reports by the scanner entrypoint. They are stable human-readable summaries, not Trivy `convert --format table` output.
+
 ### Summary JSON Example
 
 ```json
@@ -180,11 +183,13 @@ Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `tr
 
 The wrappers expose the most common overrides as CLI parameters. The image still supports environment-variable-based configuration, which is useful if you invoke the container directly.
 
+You can also point either wrapper at a config file outside this repository with `-ConfigPath` or `--config-path`. This is the supported way to reuse the scanner image from another source repository while keeping repo-specific scan policy in that external repository.
+
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `SCAN_PATH` | `.` | Directory to scan |
 | `OUTPUT_PATH` | `./output` | Results directory |
-| `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude |
+| `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude from Semgrep, Trivy, Syft, and entrypoint file discovery. Use `./path` to anchor a rule at the repo root; patterns without `./` are treated as basename or suffix matches. For direct Syft compatibility, prefer patterns starting with `./`, `*/`, or `**/`. |
 | `FAIL_ON_SEVERITY` | `CRITICAL,HIGH` | Severity levels that cause failure |
 | `TRIVY_TIMEOUT` | `30m` | Timeout passed to each Trivy filesystem scan |
 | `ALLOW_ROOT_FALLBACK` | `false` | Explicitly allow root execution if the runtime cannot drop privileges |

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Gianni Rosa Gallina.
+# This script is licensed under the APACHE-2.0 License. See LICENSE file in the project root for full license information.
+# It is part of Security Scanner project. See https://github.com/gianni-rg/security-scanner for more details.
 
 set -euo pipefail
 
@@ -13,7 +16,7 @@ SYNOPSIS
   Run the hardened security-scanner container against a source directory or container image.
 
 USAGE
-  ./$script_name [--scan-path <path>] [--output-path <path>] [--command <name>] [--runtime auto|podman|docker]
+    ./$script_name [--scan-path <path>] [--output-path <path>] [--config-path <file>] [--command <name>] [--runtime auto|podman|docker]
                  [--image <ref>] [--image-ref <ref>] [--skip-dirs <csv>] [--fail-on-severity <csv>]
                  [--trivy-timeout <duration>] [--allow-root-fallback] [--pull] [--volume-name <name>]
                  [--show-resolved-command] [--help]
@@ -26,6 +29,7 @@ EXAMPLES
   ./$script_name --scan-path . --command all
   ./$script_name --scan-path . --command semgrep
   ./$script_name --scan-path /src/app --output-path /tmp/app-security-scan-output
+    ./$script_name --scan-path /src/app --config-path /configs/security-scanner.yml
   ./$script_name --command trivy-image --image-ref ghcr.io/org/app:tag
 
 NOTES
@@ -40,12 +44,92 @@ die() {
     exit 1
 }
 
+is_windows_drive_path() {
+    local path=$1
+    [[ "$path" =~ ^[A-Za-z]:[\\/] ]]
+}
+
+is_posix_path() {
+    local path=$1
+    [[ "$path" == /* ]]
+}
+
+to_host_path() {
+    local path=$1
+
+    if is_windows_drive_path "$path"; then
+        printf '%s\n' "$path"
+        return
+    fi
+
+    if is_posix_path "$path"; then
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -am "$path"
+            return
+        fi
+
+        if command -v wslpath >/dev/null 2>&1; then
+            wslpath -m "$path"
+            return
+        fi
+    fi
+
+    printf '%s\n' "$path"
+}
+
+to_filesystem_path() {
+    local path=$1
+
+    if is_posix_path "$path"; then
+        printf '%s\n' "$path"
+        return
+    fi
+
+    if is_windows_drive_path "$path"; then
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -u "$path"
+            return
+        fi
+
+        if command -v wslpath >/dev/null 2>&1; then
+            wslpath -u "$path"
+            return
+        fi
+    fi
+
+    printf '%s\n' "$path"
+}
+
+to_runtime_mount_path() {
+    local runtime_name=$1
+    local path=$2
+
+    if [[ "$runtime_name" == *.exe ]]; then
+        to_host_path "$path"
+        return
+    fi
+
+    printf '%s\n' "$path"
+}
+
 resolve_runtime() {
     local requested=$1
     if [[ "$requested" != "auto" ]]; then
         command -v "$requested" >/dev/null 2>&1 || die "Container runtime not found: $requested"
         printf '%s\n' "$requested"
         return
+    fi
+
+    if command -v wslpath >/dev/null 2>&1; then
+        if command -v podman.exe >/dev/null 2>&1; then
+            printf '%s\n' 'podman.exe'
+            return
+        fi
+
+        if command -v docker.exe >/dev/null 2>&1; then
+            printf '%s\n' 'docker.exe'
+            return
+        fi
     fi
 
     if command -v podman >/dev/null 2>&1; then
@@ -63,32 +147,57 @@ resolve_runtime() {
 
 resolve_existing_dir() {
     local path=$1
-    [[ -d "$path" ]] || die "Scan path must be an existing directory: $path"
-    (cd "$path" && pwd -P)
+    local fs_path
+
+    fs_path=$(to_filesystem_path "$path")
+    [[ -d "$fs_path" ]] || die "Scan path must be an existing directory: $path"
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$fs_path"
+        return
+    fi
+
+    (cd "$fs_path" && pwd -P)
 }
 
 resolve_candidate_path() {
     local path=$1
-    if command -v realpath >/dev/null 2>&1; then
-        realpath -m "$path"
-        return
-    fi
-
-    if [[ -e "$path" ]]; then
-        (cd "$path" && pwd -P)
-        return
-    fi
-
+    local fs_path
     local dir_name base_name
-    dir_name=$(dirname "$path")
-    base_name=$(basename "$path")
+
+    fs_path=$(to_filesystem_path "$path")
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m "$fs_path"
+        return
+    fi
+
+    if [[ -e "$fs_path" ]]; then
+        if [[ -d "$fs_path" ]]; then
+            (cd "$fs_path" && pwd -P)
+            return
+        fi
+
+        dir_name=$(dirname "$fs_path")
+        base_name=$(basename "$fs_path")
+        printf '%s/%s\n' "$(cd "$dir_name" && pwd -P)" "$base_name"
+        return
+    fi
+
+    dir_name=$(dirname "$fs_path")
+    base_name=$(basename "$fs_path")
 
     if [[ -d "$dir_name" ]]; then
         printf '%s/%s\n' "$(cd "$dir_name" && pwd -P)" "$base_name"
         return
     fi
 
-    printf '%s/%s\n' "$(pwd -P)" "$path"
+    if [[ "$fs_path" = /* ]]; then
+        printf '%s\n' "$fs_path"
+        return
+    fi
+
+    printf '%s/%s\n' "$(pwd -P)" "$fs_path"
 }
 
 default_output_path() {
@@ -109,6 +218,7 @@ is_subpath() {
 
 scan_path='.'
 output_path=''
+config_path=''
 command_name='all'
 runtime='auto'
 image='localhost/security-scanner:latest'
@@ -131,6 +241,11 @@ while [[ $# -gt 0 ]]; do
         --output-path)
             [[ $# -ge 2 ]] || die 'Missing value for --output-path'
             output_path=$2
+            shift 2
+            ;;
+        --config-path)
+            [[ $# -ge 2 ]] || die 'Missing value for --config-path'
+            config_path=$2
             shift 2
             ;;
         --command)
@@ -217,6 +332,12 @@ if [[ -z "$output_path" ]]; then
 fi
 resolved_output_path=$(resolve_candidate_path "$output_path")
 
+resolved_config_path=''
+if [[ -n "$config_path" ]]; then
+    [[ -f "$(to_filesystem_path "$config_path")" ]] || die "Config path must be an existing file: $config_path"
+    resolved_config_path=$(resolve_candidate_path "$config_path")
+fi
+
 if [[ "$command_name" != 'trivy-image' ]] && is_subpath "$resolved_scan_path" "$resolved_output_path"; then
     die "Output path must be outside the scan path to avoid re-scanning generated reports: $resolved_output_path"
 fi
@@ -228,6 +349,13 @@ fi
 mkdir -p "$resolved_output_path"
 
 resolved_runtime=$(resolve_runtime "$runtime")
+runtime_scan_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_scan_path")
+runtime_output_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_output_path")
+runtime_config_path=''
+if [[ -n "$resolved_config_path" ]]; then
+    runtime_config_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_config_path")
+fi
+
 if [[ "$pull" == 'true' ]]; then
     "$resolved_runtime" pull "$image"
 fi
@@ -236,9 +364,10 @@ if ! "$resolved_runtime" volume inspect "$volume_name" >/dev/null 2>&1; then
     "$resolved_runtime" volume create "$volume_name" >/dev/null
 fi
 
-output_mount="type=bind,src=$resolved_output_path,dst=/output"
+output_mount="type=bind,src=$runtime_output_path,dst=/output"
 cache_mount="type=volume,src=$volume_name,dst=/var/lib/trivy"
-scan_mount="type=bind,src=$resolved_scan_path,dst=/workspace,readonly"
+scan_mount="type=bind,src=$runtime_scan_path,dst=/workspace,readonly"
+config_mount=''
 
 run_args=(
     run
@@ -252,9 +381,15 @@ run_args=(
     --mount "$output_mount"
     --mount "$cache_mount"
     --env OUTPUT_DIR=/output
-    --env CONFIG_FILE=/app/config.yml
     --env "ALLOW_ROOT_FALLBACK=$allow_root_fallback"
 )
+
+if [[ -n "$resolved_config_path" ]]; then
+    config_mount="type=bind,src=$runtime_config_path,dst=/run/scanner/config.yml,readonly"
+    run_args+=(--mount "$config_mount" --env CONFIG_FILE=/run/scanner/config.yml)
+else
+    run_args+=(--env CONFIG_FILE=/app/config.yml)
+fi
 
 if [[ "$allow_root_fallback" == 'true' ]]; then
     run_args+=(--user 0:0)
@@ -293,6 +428,11 @@ else
     printf '  ScanPath: %s\n' "$resolved_scan_path"
 fi
 printf '  OutputPath: %s\n' "$resolved_output_path"
+if [[ -n "$resolved_config_path" ]]; then
+    printf '  ConfigPath: %s\n' "$resolved_config_path"
+else
+    printf '  ConfigPath: %s\n' '/app/config.yml (image default)'
+fi
 printf '  CacheVolume: %s\n' "$volume_name"
 printf '  AllowRootFallback: %s\n' "$allow_root_fallback"
 
