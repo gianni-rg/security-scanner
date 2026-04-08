@@ -321,6 +321,56 @@ merge_trivy_fs_reports() {
     ' "$@" > "$output_file"
 }
 
+rewrite_trivy_config_report_targets() {
+    local input_file=$1
+    local scan_target=$2
+
+    python - "$input_file" "$scan_target" <<'PY'
+import json
+import posixpath
+import sys
+
+input_path, scan_target = sys.argv[1:3]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    report = json.load(handle)
+
+normalized_target = scan_target[2:] if scan_target.startswith('./') else scan_target
+normalized_target = normalized_target.rstrip('/') or normalized_target
+scan_basename = posixpath.basename(normalized_target)
+
+for result in report.get('Results') or []:
+    current = (result.get('Target') or '').lstrip('./')
+
+    if not current or current == '.':
+        result['Target'] = normalized_target
+        continue
+
+    if current == normalized_target:
+        result['Target'] = normalized_target
+        continue
+
+    if current == scan_basename:
+        result['Target'] = normalized_target
+        continue
+
+    if normalized_target.endswith('/' + current):
+        result['Target'] = normalized_target
+        continue
+
+    if '/' in current and not current.startswith(normalized_target + '/'):
+        result['Target'] = posixpath.join(normalized_target, current)
+        continue
+
+    if '/' not in current:
+        result['Target'] = posixpath.join(normalized_target, current)
+
+with open(input_path, 'w', encoding='utf-8') as handle:
+    json.dump(report, handle, indent=2)
+    handle.write('\n')
+PY
+}
+
 collect_trivy_config_targets() {
     local array_name=$1
     # shellcheck disable=SC2178
@@ -365,6 +415,279 @@ convert_trivy_report() {
         --format "$format" \
         --output "$output_file" \
         "$input_file"
+}
+
+write_trivy_text_report() {
+    local input_file=$1
+    local report_kind=$2
+    local output_file=$3
+
+    python - "$input_file" "$report_kind" "$output_file" <<'PY'
+import json
+import sys
+
+input_path, report_kind, output_path = sys.argv[1:4]
+
+with open(input_path, 'r', encoding='utf-8') as handle:
+    report = json.load(handle)
+
+results = report.get('Results') or []
+artifact_name = report.get('ArtifactName') or 'unknown'
+
+
+def severity_rank(value: str) -> int:
+    order = {
+        'CRITICAL': 0,
+        'HIGH': 1,
+        'MEDIUM': 2,
+        'LOW': 3,
+        'UNKNOWN': 4,
+    }
+    return order.get((value or 'UNKNOWN').upper(), 5)
+
+
+def trim(value, length):
+    text = '' if value is None else str(value)
+    if len(text) <= length:
+        return text
+    if length <= 3:
+        return text[:length]
+    return text[: length - 3] + '...'
+
+
+def write_table(lines, headers, rows, widths):
+    if not rows:
+        return
+
+    def fmt(row):
+        padded = []
+        for index, cell in enumerate(row):
+            padded.append(trim(cell, widths[index]).ljust(widths[index]))
+        return ' | '.join(padded)
+
+    separator = '-+-'.join('-' * width for width in widths)
+    lines.append(fmt(headers))
+    lines.append(separator)
+    for row in rows:
+        lines.append(fmt(row))
+
+
+def summarize_vulnerabilities(lines):
+    findings = []
+    total_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
+
+    for result in results:
+        for vuln in result.get('Vulnerabilities') or []:
+            severity = (vuln.get('Severity') or 'UNKNOWN').upper()
+            total_by_severity.setdefault(severity, 0)
+            total_by_severity[severity] += 1
+            findings.append(
+                {
+                    'target': result.get('Target') or artifact_name,
+                    'class': result.get('Class') or result.get('Type') or 'library',
+                    'package': vuln.get('PkgName') or '',
+                    'id': vuln.get('VulnerabilityID') or '',
+                    'severity': severity,
+                    'installed': vuln.get('InstalledVersion') or '',
+                    'fixed': vuln.get('FixedVersion') or '',
+                    'title': vuln.get('Title') or '',
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(
+        'Summary: Critical={CRITICAL}, High={HIGH}, Medium={MEDIUM}, Low={LOW}, Unknown={UNKNOWN}'.format(
+            **total_by_severity
+        )
+    )
+    lines.append('')
+
+    if not findings:
+        lines.append('No vulnerabilities found.')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['Package', 'Vulnerability', 'Severity', 'Installed', 'Fixed', 'Title']
+    widths = [24, 18, 8, 16, 16, 54]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], severity_rank(item['severity']), item['package'], item['id'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['package'],
+            finding['id'],
+            finding['severity'],
+            finding['installed'],
+            finding['fixed'],
+            finding['title'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+def summarize_licenses(lines):
+    findings = []
+    total = 0
+
+    for result in results:
+        for license_item in result.get('Licenses') or []:
+            total += 1
+            findings.append(
+                {
+                    'target': result.get('Target') or artifact_name,
+                    'class': result.get('Class') or result.get('Type') or 'license',
+                    'package': license_item.get('PkgName') or '',
+                    'license': license_item.get('Name') or '',
+                    'classification': license_item.get('Classification') or '',
+                    'severity': (license_item.get('Severity') or '').upper(),
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(f'Summary: Licenses={total}')
+    lines.append('')
+
+    if not findings:
+        lines.append('No licenses found.')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['Package', 'License', 'Classification', 'Severity']
+    widths = [34, 20, 16, 8]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], item['package'], item['license'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['package'],
+            finding['license'],
+            finding['classification'],
+            finding['severity'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+def summarize_misconfigurations(lines):
+    findings = []
+    total_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'UNKNOWN': 0}
+    scanned_targets = []
+
+    for result in results:
+        target = result.get('Target') or artifact_name
+        scanned_targets.append((target, result.get('Class') or result.get('Type') or 'config'))
+        for item in result.get('Misconfigurations') or []:
+            severity = (item.get('Severity') or 'UNKNOWN').upper()
+            total_by_severity.setdefault(severity, 0)
+            total_by_severity[severity] += 1
+            findings.append(
+                {
+                    'target': target,
+                    'class': result.get('Class') or result.get('Type') or 'config',
+                    'id': item.get('ID') or '',
+                    'type': item.get('Type') or '',
+                    'severity': severity,
+                    'status': item.get('Status') or '',
+                    'title': item.get('Title') or '',
+                }
+            )
+
+    lines.append(f'Report type: {report_kind}')
+    lines.append(f'Artifact: {artifact_name}')
+    lines.append(f'Scanned targets: {len(scanned_targets)}')
+    lines.append(
+        'Summary: Critical={CRITICAL}, High={HIGH}, Medium={MEDIUM}, Low={LOW}, Unknown={UNKNOWN}'.format(
+            **total_by_severity
+        )
+    )
+    lines.append('')
+
+    if not findings:
+        lines.append('No misconfigurations found.')
+        if scanned_targets:
+            lines.append('Scanned target list:')
+            for target, target_class in scanned_targets:
+                lines.append(f'- {target} ({target_class})')
+        return
+
+    current_target = None
+    rows = []
+    headers = ['ID', 'Type', 'Severity', 'Status', 'Title']
+    widths = [18, 18, 8, 12, 60]
+
+    def flush_rows(target_name, target_class, pending_rows):
+        if not pending_rows:
+            return
+        lines.append(f'{target_name} ({target_class})')
+        lines.append('=' * len(lines[-1]))
+        write_table(lines, headers, pending_rows, widths)
+        lines.append('')
+
+    for finding in sorted(findings, key=lambda item: (item['target'], severity_rank(item['severity']), item['id'])):
+        target_key = (finding['target'], finding['class'])
+        if current_target is None:
+            current_target = target_key
+        if target_key != current_target:
+            flush_rows(current_target[0], current_target[1], rows)
+            rows = []
+            current_target = target_key
+
+        rows.append([
+            finding['id'],
+            finding['type'],
+            finding['severity'],
+            finding['status'],
+            finding['title'],
+        ])
+
+    flush_rows(current_target[0], current_target[1], rows)
+
+
+lines = []
+if report_kind in {'vuln', 'image'}:
+    summarize_vulnerabilities(lines)
+elif report_kind == 'license':
+    summarize_licenses(lines)
+elif report_kind == 'config':
+    summarize_misconfigurations(lines)
+else:
+    lines.append(f'Unsupported report kind: {report_kind}')
+
+with open(output_path, 'w', encoding='utf-8') as handle:
+    handle.write('\n'.join(lines).rstrip() + '\n')
+PY
 }
 
 path_is_skipped() {
@@ -774,7 +1097,7 @@ run_trivy_vuln() {
     fi
 
     convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
+    write_trivy_text_report "${output_file}" vuln "${table_file}"
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
@@ -853,6 +1176,8 @@ run_trivy_config() {
             return
         fi
 
+        rewrite_trivy_config_report_targets "${temp_report}" "${target}"
+
         temp_reports+=("${temp_report}")
         if [ "$scan_exit" -ne 0 ]; then
             trivy_json_exit=$scan_exit
@@ -867,11 +1192,11 @@ run_trivy_config() {
     cleanup_temp_dir
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Config" "FAILED" "Execution failed before table conversion (json=${trivy_json_exit})"
+        log_result "Trivy-Config" "FAILED" "Execution failed before summary generation (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
+    write_trivy_text_report "${output_file}" config "${table_file}"
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
@@ -924,11 +1249,11 @@ run_trivy_license() {
         . 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-License" "FAILED" "Execution failed before table conversion (json=${trivy_json_exit})"
+        log_result "Trivy-License" "FAILED" "Execution failed before summary generation (json=${trivy_json_exit})"
         return
     fi
 
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
+    write_trivy_text_report "${output_file}" license "${table_file}"
 
     # Count licenses
     if [ -f "${output_file}" ]; then
@@ -1157,7 +1482,7 @@ run_trivy_image() {
     fi
 
     convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
-    convert_trivy_report "${output_file}" table "${table_file}" 2>&1 || :
+    write_trivy_text_report "${output_file}" image "${table_file}"
 
     local critical
     local high

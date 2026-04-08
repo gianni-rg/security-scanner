@@ -150,6 +150,8 @@ output/
 
 Optional `trivy-image` runs also produce `trivy-image_YYYYMMDD_HHMMSS.json`, `trivy-image_YYYYMMDD_HHMMSS.sarif`, and `trivy-image_YYYYMMDD_HHMMSS.txt`.
 
+Trivy `.txt` artifacts are generated from the JSON reports by the scanner entrypoint. They are stable human-readable summaries, not Trivy `convert --format table` output.
+
 ### Summary JSON Example
 
 ```json
