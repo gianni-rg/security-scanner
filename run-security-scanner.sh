@@ -44,10 +44,6 @@ die() {
     exit 1
 }
 
-is_windows_drive_path() {
-    [[ "$1" =~ ^[A-Za-z]:[\\/] ]]
-}
-
 to_host_path() {
     local path=$1
 
@@ -74,6 +70,18 @@ to_filesystem_path() {
 
     if command -v wslpath >/dev/null 2>&1; then
         wslpath -u "$path"
+        return
+    fi
+
+    printf '%s\n' "$path"
+}
+
+to_runtime_mount_path() {
+    local runtime_name=$1
+    local path=$2
+
+    if [[ "$runtime_name" == *.exe ]]; then
+        to_host_path "$path"
         return
     fi
 
@@ -116,12 +124,16 @@ resolve_runtime() {
 resolve_existing_dir() {
     local path=$1
     local fs_path
-    local host_path
 
     fs_path=$(to_filesystem_path "$path")
     [[ -d "$fs_path" ]] || die "Scan path must be an existing directory: $path"
-    host_path=$(to_host_path "$fs_path")
-    printf '%s\n' "$host_path"
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$fs_path"
+        return
+    fi
+
+    (cd "$fs_path" && pwd -P)
 }
 
 resolve_candidate_path() {
@@ -131,12 +143,12 @@ resolve_candidate_path() {
     fs_path=$(to_filesystem_path "$path")
 
     if command -v realpath >/dev/null 2>&1; then
-        to_host_path "$(realpath -m "$fs_path")"
+        realpath -m "$fs_path"
         return
     fi
 
     if [[ -e "$fs_path" ]]; then
-        to_host_path "$fs_path"
+        printf '%s\n' "$fs_path"
         return
     fi
 
@@ -145,11 +157,16 @@ resolve_candidate_path() {
     base_name=$(basename "$fs_path")
 
     if [[ -d "$dir_name" ]]; then
-        to_host_path "$(cd "$dir_name" && pwd -P)/$base_name"
+        printf '%s/%s\n' "$(cd "$dir_name" && pwd -P)" "$base_name"
         return
     fi
 
-    to_host_path "$(pwd -P)/$path"
+    if [[ "$fs_path" = /* ]]; then
+        printf '%s\n' "$fs_path"
+        return
+    fi
+
+    printf '%s/%s\n' "$(pwd -P)" "$fs_path"
 }
 
 default_output_path() {
@@ -301,6 +318,13 @@ fi
 mkdir -p "$resolved_output_path"
 
 resolved_runtime=$(resolve_runtime "$runtime")
+runtime_scan_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_scan_path")
+runtime_output_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_output_path")
+runtime_config_path=''
+if [[ -n "$resolved_config_path" ]]; then
+    runtime_config_path=$(to_runtime_mount_path "$resolved_runtime" "$resolved_config_path")
+fi
+
 if [[ "$pull" == 'true' ]]; then
     "$resolved_runtime" pull "$image"
 fi
@@ -309,9 +333,9 @@ if ! "$resolved_runtime" volume inspect "$volume_name" >/dev/null 2>&1; then
     "$resolved_runtime" volume create "$volume_name" >/dev/null
 fi
 
-output_mount="type=bind,src=$resolved_output_path,dst=/output"
+output_mount="type=bind,src=$runtime_output_path,dst=/output"
 cache_mount="type=volume,src=$volume_name,dst=/var/lib/trivy"
-scan_mount="type=bind,src=$resolved_scan_path,dst=/workspace,readonly"
+scan_mount="type=bind,src=$runtime_scan_path,dst=/workspace,readonly"
 config_mount=''
 
 run_args=(
@@ -330,7 +354,7 @@ run_args=(
 )
 
 if [[ -n "$resolved_config_path" ]]; then
-    config_mount="type=bind,src=$resolved_config_path,dst=/run/scanner/config.yml,readonly"
+    config_mount="type=bind,src=$runtime_config_path,dst=/run/scanner/config.yml,readonly"
     run_args+=(--mount "$config_mount" --env CONFIG_FILE=/run/scanner/config.yml)
 else
     run_args+=(--env CONFIG_FILE=/app/config.yml)

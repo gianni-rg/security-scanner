@@ -232,7 +232,7 @@ build_trivy_skip_args() {
         while IFS= read -r -d '' path; do
             normalized="${path#./}"
             append_unique_value expanded_dirs "$normalized"
-        done < <(find . -type d \( "${prune_args[@]}" \) -print0 2>/dev/null)
+        done < <(find . -type d \( "${prune_args[@]}" \) -prune -print0 2>/dev/null)
     fi
 
     if [ "${#expanded_dirs[@]}" -eq 0 ]; then
@@ -290,24 +290,6 @@ merge_trivy_fs_reports() {
     ' "$@" > "$output_file"
 }
 
-append_unique_target() {
-    local array_name=$1
-    local value=$2
-    # shellcheck disable=SC2178
-    local -n target_array="$array_name"
-    local existing
-
-    [ -z "$value" ] && return
-
-    for existing in "${target_array[@]}"; do
-        if [ "$existing" = "$value" ]; then
-            return
-        fi
-    done
-
-    target_array+=("$value")
-}
-
 collect_trivy_config_targets() {
     local array_name=$1
     # shellcheck disable=SC2178
@@ -322,23 +304,23 @@ collect_trivy_config_targets() {
 
     find_files_with_prune terraform_files -type f \( -name "*.tf" -o -name "*.tf.json" \)
     for target in "${terraform_files[@]}"; do
-        append_unique_target "$array_name" "$target"
+        append_unique_value "$array_name" "$target"
     done
 
     find_files_with_prune docker_related_files -type f \( -name "Dockerfile*" -o -name "*.dockerfile" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" \)
     for target in "${docker_related_files[@]}"; do
-        append_unique_target "$array_name" "$target"
+        append_unique_value "$array_name" "$target"
     done
 
     find_files_with_prune chart_files -type f -name "Chart.yaml"
     for target in "${chart_files[@]}"; do
-        append_unique_target "$array_name" "$(dirname "$target")"
+        append_unique_value "$array_name" "$(dirname "$target")"
     done
 
     find_files_with_prune yaml_files -type f \( -name "*.yaml" -o -name "*.yml" \)
     for target in "${yaml_files[@]}"; do
         if grep -E -q -m 1 '^(apiVersion|kind|AWSTemplateFormatVersion|Resources|hosts|tasks):' "${target}" 2>/dev/null; then
-            append_unique_target "$array_name" "$target"
+            append_unique_value "$array_name" "$target"
         fi
     done
 }
@@ -780,6 +762,10 @@ run_trivy_config() {
     local temp_report
     local scan_exit
 
+    cleanup_temp_dir() {
+        [ -n "${temp_dir:-}" ] && [ -d "${temp_dir}" ] && rm -rf "${temp_dir}"
+    }
+
     cd "${SCAN_DIR}"
 
     build_trivy_skip_args skip_args
@@ -794,7 +780,7 @@ run_trivy_config() {
     temp_dir=$(mktemp -d)
 
     for target in "${config_targets[@]}"; do
-        target_name=$(echo "${target#./}" | tr '/\\:' '___')
+        target_name=$(printf '%s' "${target#./}" | tr '/\\:' '___')
         temp_report="${temp_dir}/${target_name}.json"
         scan_exit=0
 
@@ -809,7 +795,7 @@ run_trivy_config() {
 
         if ! ensure_valid_json_report "${temp_report}"; then
             trivy_json_exit=${scan_exit:-1}
-            rm -rf "${temp_dir}"
+            cleanup_temp_dir
             log_result "Trivy-Config" "FAILED" "Execution failed while scanning ${target}"
             return
         fi
@@ -820,8 +806,12 @@ run_trivy_config() {
         fi
     done
 
-    merge_trivy_fs_reports "${output_file}" "${temp_reports[@]}"
-    rm -rf "${temp_dir}"
+    if ! merge_trivy_fs_reports "${output_file}" "${temp_reports[@]}"; then
+        cleanup_temp_dir
+        log_result "Trivy-Config" "FAILED" "Execution failed while merging scan reports"
+        return
+    fi
+    cleanup_temp_dir
 
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Config" "FAILED" "Execution failed (json=${trivy_json_exit}, table=${trivy_table_exit})"
