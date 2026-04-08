@@ -690,6 +690,18 @@ with open(output_path, 'w', encoding='utf-8') as handle:
 PY
 }
 
+write_trivy_text_report_best_effort() {
+    local scan_name=$1
+    local input_file=$2
+    local report_kind=$3
+    local output_file=$4
+
+    if ! write_trivy_text_report "$input_file" "$report_kind" "$output_file"; then
+        rm -f "$output_file" 2>/dev/null || true
+        log_warning "$scan_name" "Text report generation failed; continuing with JSON report only"
+    fi
+}
+
 path_is_skipped() {
     local path=$1
     local item
@@ -961,6 +973,13 @@ log_result() {
     fi
 }
 
+log_warning() {
+    local scan_name=$1
+    local details=$2
+
+    echo -e "${YELLOW}⚠️ ${scan_name}: WARNING${NC} - ${details}"
+}
+
 # =============================================================================
 # GITLEAKS - Secret Detection
 # =============================================================================
@@ -1097,7 +1116,7 @@ run_trivy_vuln() {
     fi
 
     convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
-    write_trivy_text_report "${output_file}" vuln "${table_file}"
+    write_trivy_text_report_best_effort "Trivy-Vuln" "${output_file}" vuln "${table_file}"
 
     # Count vulnerabilities
     if [ -f "${output_file}" ]; then
@@ -1176,7 +1195,11 @@ run_trivy_config() {
             return
         fi
 
-        rewrite_trivy_config_report_targets "${temp_report}" "${target}"
+        if ! rewrite_trivy_config_report_targets "${temp_report}" "${target}"; then
+            cleanup_temp_dir
+            log_result "Trivy-Config" "FAILED" "Execution failed while normalizing results for ${target}"
+            return
+        fi
 
         temp_reports+=("${temp_report}")
         if [ "$scan_exit" -ne 0 ]; then
@@ -1196,7 +1219,7 @@ run_trivy_config() {
         return
     fi
 
-    write_trivy_text_report "${output_file}" config "${table_file}"
+    write_trivy_text_report_best_effort "Trivy-Config" "${output_file}" config "${table_file}"
 
     # Count misconfigurations
     if [ -f "${output_file}" ]; then
@@ -1253,7 +1276,7 @@ run_trivy_license() {
         return
     fi
 
-    write_trivy_text_report "${output_file}" license "${table_file}"
+    write_trivy_text_report_best_effort "Trivy-License" "${output_file}" license "${table_file}"
 
     # Count licenses
     if [ -f "${output_file}" ]; then
@@ -1482,7 +1505,7 @@ run_trivy_image() {
     fi
 
     convert_trivy_report "${output_file}" sarif "${sarif_file}" 2>&1 || :
-    write_trivy_text_report "${output_file}" image "${table_file}"
+    write_trivy_text_report_best_effort "Trivy-Image" "${output_file}" image "${table_file}"
 
     local critical
     local high

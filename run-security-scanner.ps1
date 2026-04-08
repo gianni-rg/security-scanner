@@ -204,9 +204,9 @@ else {
 
 $resolvedConfigPath = $null
 if ($PSBoundParameters.ContainsKey('ConfigPath')) {
-    $resolvedConfigPath = Resolve-PathStrict -Path $ConfigPath
+    $resolvedConfigPath = Resolve-PathStrict -Path $ConfigPath -AllowMissing
     if (-not (Test-Path -LiteralPath $resolvedConfigPath -PathType Leaf)) {
-        throw "ConfigPath must be an existing file: $resolvedConfigPath"
+        throw "ConfigPath must be an existing file: $ConfigPath"
     }
 }
 
