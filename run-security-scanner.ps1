@@ -41,6 +41,9 @@ USAGE
                 [-TrivyTimeout <duration>] [-AllowRootFallback] [-Pull] [-VolumeName <name>]
                 [-ShowResolvedCommand] [-Help]
 
+    Optional registry auth for private images:
+        Set TRIVY_REGISTRY_USERNAME and TRIVY_REGISTRY_PASSWORD in your shell before running trivy-image.
+
 COMMANDS
   all, gitleaks, semgrep, trivy, trivy-vuln, trivy-config, trivy-license,
   syft, hadolint, shellcheck, yamllint, trivy-image
@@ -218,6 +221,14 @@ if ($Command -eq 'trivy-image' -and [string]::IsNullOrWhiteSpace($ImageRef)) {
     throw 'ImageRef is required when Command is trivy-image.'
 }
 
+if ($PSBoundParameters.ContainsKey('ShowResolvedCommand') -and -not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
+    Write-Warning 'ShowResolvedCommand may expose TRIVY_REGISTRY_PASSWORD in terminal output.'
+}
+
+if ([string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_USERNAME) -xor [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
+    throw 'Set both TRIVY_REGISTRY_USERNAME and TRIVY_REGISTRY_PASSWORD (or neither).'
+}
+
 New-Item -ItemType Directory -Path $resolvedOutputPath -Force | Out-Null
 
 $resolvedRuntime = Resolve-RuntimeName -RequestedRuntime $Runtime
@@ -281,6 +292,14 @@ if (-not [string]::IsNullOrWhiteSpace($TrivyTimeout)) {
 
 if (-not [string]::IsNullOrWhiteSpace($ImageRef)) {
     $runArguments += @('--env', "IMAGE_REF=$ImageRef")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_USERNAME)) {
+    $runArguments += @('--env', "TRIVY_REGISTRY_USERNAME=$($env:TRIVY_REGISTRY_USERNAME)")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
+    $runArguments += @('--env', "TRIVY_REGISTRY_PASSWORD=$($env:TRIVY_REGISTRY_PASSWORD)")
 }
 
 $runArguments += @($Image, $Command)

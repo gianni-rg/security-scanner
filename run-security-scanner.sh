@@ -21,6 +21,9 @@ USAGE
                  [--trivy-timeout <duration>] [--allow-root-fallback] [--pull] [--volume-name <name>]
                  [--show-resolved-command] [--help]
 
+    Optional registry auth for private images:
+        Set TRIVY_REGISTRY_USERNAME and TRIVY_REGISTRY_PASSWORD in your shell before running trivy-image.
+
 COMMANDS
   all, gitleaks, semgrep, trivy, trivy-vuln, trivy-config, trivy-license,
   syft, hadolint, shellcheck, yamllint, trivy-image
@@ -346,6 +349,14 @@ if [[ "$command_name" == 'trivy-image' && -z "$image_ref" ]]; then
     die 'Image reference is required when --command trivy-image is used.'
 fi
 
+if [[ -n "${TRIVY_REGISTRY_USERNAME:-}" && -z "${TRIVY_REGISTRY_PASSWORD:-}" ]] || [[ -z "${TRIVY_REGISTRY_USERNAME:-}" && -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
+    die 'Set both TRIVY_REGISTRY_USERNAME and TRIVY_REGISTRY_PASSWORD (or neither).'
+fi
+
+if [[ "$show_resolved_command" == 'true' && -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
+    printf 'Warning: --show-resolved-command may expose TRIVY_REGISTRY_PASSWORD in terminal output.\n' >&2
+fi
+
 mkdir -p "$resolved_output_path"
 
 resolved_runtime=$(resolve_runtime "$runtime")
@@ -413,6 +424,14 @@ fi
 
 if [[ -n "$image_ref" ]]; then
     run_args+=(--env "IMAGE_REF=$image_ref")
+fi
+
+if [[ -n "${TRIVY_REGISTRY_USERNAME:-}" ]]; then
+    run_args+=(--env "TRIVY_REGISTRY_USERNAME=$TRIVY_REGISTRY_USERNAME")
+fi
+
+if [[ -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
+    run_args+=(--env "TRIVY_REGISTRY_PASSWORD=$TRIVY_REGISTRY_PASSWORD")
 fi
 
 run_args+=("$image" "$command_name")

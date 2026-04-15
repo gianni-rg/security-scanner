@@ -806,6 +806,8 @@ SHELLCHECK_SEVERITY="${SHELLCHECK_SEVERITY:-${DEFAULT_SHELLCHECK_SEVERITY:-warni
 YAMLLINT_FAIL_ON="${YAMLLINT_FAIL_ON:-${DEFAULT_YAMLLINT_FAIL_ON:-error,warning}}"
 YAMLLINT_CONFIG_DATA="${YAMLLINT_CONFIG_DATA:-{extends: default, rules: {line-length: disable, comments: disable, comments-indentation: disable, document-start: disable}}}"
 IMAGE_REF="${IMAGE_REF:-}"
+TRIVY_REGISTRY_USERNAME="${TRIVY_REGISTRY_USERNAME:-}"
+TRIVY_REGISTRY_PASSWORD="${TRIVY_REGISTRY_PASSWORD:-}"
 ALLOW_ROOT_FALLBACK="${ALLOW_ROOT_FALLBACK:-false}"
 
 # shellcheck disable=SC2034
@@ -1486,10 +1488,15 @@ run_trivy_image() {
     local sarif_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif"
     local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
     local trivy_json_exit=0
+    local -a auth_args=()
 
     if [ -z "${IMAGE_REF}" ]; then
         log_result "Trivy-Image" "SKIPPED" "IMAGE_REF is not set"
         return
+    fi
+
+    if [ -n "${TRIVY_REGISTRY_USERNAME}" ] && [ -n "${TRIVY_REGISTRY_PASSWORD}" ]; then
+        auth_args=(--username "${TRIVY_REGISTRY_USERNAME}" --password "${TRIVY_REGISTRY_PASSWORD}")
     fi
 
     run_as_scanner trivy image \
@@ -1497,6 +1504,7 @@ run_trivy_image() {
         --output "${output_file}" \
         --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
+        "${auth_args[@]}" \
         "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
