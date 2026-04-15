@@ -13,13 +13,21 @@ ARG JQ_SHA256=020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d
 ARG SEMGREP_VERSION=1.159.0
 ARG PYYAML_VERSION=6.0.3
 ARG YAMLLINT_VERSION=1.38.0
+ARG CA_CERTIFICATES_APT_VERSION=20250419
+ARG CURL_APT_VERSION=8.14.1-2+deb13u2
+ARG TAR_APT_VERSION=1.35+dfsg-3.1
+ARG OPENSSL_APT_VERSION=3.5.5-1~deb13u2
+ARG LIBSSL_APT_VERSION=3.5.5-1~deb13u2
+ARG OPENSSL_PROVIDER_LEGACY_APT_VERSION=3.5.5-1~deb13u2
+ARG SHELLCHECK_APT_VERSION=0.10.0-1
+ARG GIT_APT_VERSION=1:2.47.3-0+deb13u1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        tar \
+    ca-certificates=${CA_CERTIFICATES_APT_VERSION} \
+    curl=${CURL_APT_VERSION} \
+    tar=${TAR_APT_VERSION} \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python tooling into an isolated virtual environment for runtime copy.
@@ -34,47 +42,61 @@ RUN python -m venv /opt/venv \
 
 RUN echo "Installing Gitleaks ${GITLEAKS_VERSION}..." \
     && curl -fsSLo /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-    && echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${GITLEAKS_SHA256}" '/tmp/gitleaks.tar.gz' > /tmp/gitleaks.tar.gz.sha256 \
+    && sha256sum -c /tmp/gitleaks.tar.gz.sha256 \
     && tar -xzf /tmp/gitleaks.tar.gz -C /tmp \
     && mv /tmp/gitleaks /usr/local/bin/ \
     && chmod +x /usr/local/bin/gitleaks \
-    && rm -f /tmp/gitleaks.tar.gz \
+    && rm -f /tmp/gitleaks.tar.gz /tmp/gitleaks.tar.gz.sha256 \
     && gitleaks version
 
 RUN echo "Installing Trivy ${TRIVY_VERSION}..." \
     && curl -fsSLo /tmp/trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-    && echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${TRIVY_SHA256}" '/tmp/trivy.tar.gz' > /tmp/trivy.tar.gz.sha256 \
+    && sha256sum -c /tmp/trivy.tar.gz.sha256 \
     && tar -xzf /tmp/trivy.tar.gz -C /tmp trivy \
     && mv /tmp/trivy /usr/local/bin/ \
     && chmod +x /usr/local/bin/trivy \
-    && rm -f /tmp/trivy.tar.gz \
+    && rm -f /tmp/trivy.tar.gz /tmp/trivy.tar.gz.sha256 \
     && trivy version
 
 RUN echo "Installing Syft ${SYFT_VERSION}..." \
     && curl -fsSLo /tmp/syft.tar.gz "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
-    && echo "${SYFT_SHA256}  /tmp/syft.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${SYFT_SHA256}" '/tmp/syft.tar.gz' > /tmp/syft.tar.gz.sha256 \
+    && sha256sum -c /tmp/syft.tar.gz.sha256 \
     && tar -xzf /tmp/syft.tar.gz -C /tmp syft \
     && mv /tmp/syft /usr/local/bin/ \
     && chmod +x /usr/local/bin/syft \
-    && rm -f /tmp/syft.tar.gz \
+    && rm -f /tmp/syft.tar.gz /tmp/syft.tar.gz.sha256 \
     && syft version
 
 RUN echo "Installing Hadolint ${HADOLINT_VERSION}..." \
     && curl -fsSLo /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64" \
-    && echo "${HADOLINT_SHA256}  /usr/local/bin/hadolint" | sha256sum -c - \
+    && printf '%s  %s\n' "${HADOLINT_SHA256}" '/usr/local/bin/hadolint' > /tmp/hadolint.sha256 \
+    && sha256sum -c /tmp/hadolint.sha256 \
     && chmod +x /usr/local/bin/hadolint \
+    && rm -f /tmp/hadolint.sha256 \
     && hadolint --version
 
 RUN echo "Installing jq ${JQ_VERSION}..." \
     && curl -fsSLo /usr/local/bin/jq "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-amd64" \
-    && echo "${JQ_SHA256}  /usr/local/bin/jq" | sha256sum -c - \
+    && printf '%s  %s\n' "${JQ_SHA256}" '/usr/local/bin/jq' > /tmp/jq.sha256 \
+    && sha256sum -c /tmp/jq.sha256 \
     && chmod +x /usr/local/bin/jq \
+    && rm -f /tmp/jq.sha256 \
     && jq --version
 
 RUN rm -f /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.12 \
     && find /opt/venv/lib -type d \( -name 'pip' -o -name 'pip-*.dist-info' \) -prune -exec rm -rf {} +
 
 FROM python:3.12-slim
+
+ARG CA_CERTIFICATES_APT_VERSION=20250419
+ARG OPENSSL_APT_VERSION=3.5.5-1~deb13u2
+ARG LIBSSL_APT_VERSION=3.5.5-1~deb13u2
+ARG OPENSSL_PROVIDER_LEGACY_APT_VERSION=3.5.5-1~deb13u2
+ARG SHELLCHECK_APT_VERSION=0.10.0-1
+ARG GIT_APT_VERSION=1:2.47.3-0+deb13u1
 
 LABEL maintainer="Gianni Rosa Gallina"
 LABEL description="Opinionated containerized security scanner toolset"
@@ -94,10 +116,14 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        --only-upgrade openssl libssl3t64 openssl-provider-legacy \
+        --only-upgrade \
+        openssl=${OPENSSL_APT_VERSION} \
+        libssl3t64=${LIBSSL_APT_VERSION} \
+        openssl-provider-legacy=${OPENSSL_PROVIDER_LEGACY_APT_VERSION} \
     && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        shellcheck \
+        ca-certificates=${CA_CERTIFICATES_APT_VERSION} \
+        shellcheck=${SHELLCHECK_APT_VERSION} \
+        git=${GIT_APT_VERSION} \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 scanner \
     && useradd --system --uid 10001 --gid 10001 --home-dir /home/scanner --create-home scanner \
