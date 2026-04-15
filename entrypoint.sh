@@ -806,6 +806,7 @@ SHELLCHECK_SEVERITY="${SHELLCHECK_SEVERITY:-${DEFAULT_SHELLCHECK_SEVERITY:-warni
 YAMLLINT_FAIL_ON="${YAMLLINT_FAIL_ON:-${DEFAULT_YAMLLINT_FAIL_ON:-error,warning}}"
 YAMLLINT_CONFIG_DATA="${YAMLLINT_CONFIG_DATA:-{extends: default, rules: {line-length: disable, comments: disable, comments-indentation: disable, document-start: disable}}}"
 IMAGE_REF="${IMAGE_REF:-}"
+IMAGE_INPUT="${IMAGE_INPUT:-}"
 TRIVY_REGISTRY_USERNAME="${TRIVY_REGISTRY_USERNAME:-}"
 TRIVY_REGISTRY_PASSWORD="${TRIVY_REGISTRY_PASSWORD:-}"
 ALLOW_ROOT_FALLBACK="${ALLOW_ROOT_FALLBACK:-false}"
@@ -1489,14 +1490,25 @@ run_trivy_image() {
     local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
     local trivy_json_exit=0
     local -a auth_args=()
+    local -a source_args=()
 
-    if [ -z "${IMAGE_REF}" ]; then
-        log_result "Trivy-Image" "SKIPPED" "IMAGE_REF is not set"
+    if [ -z "${IMAGE_REF}" ] && [ -z "${IMAGE_INPUT}" ]; then
+        log_result "Trivy-Image" "SKIPPED" "IMAGE_REF and IMAGE_INPUT are both unset"
         return
     fi
 
     if [ -n "${TRIVY_REGISTRY_USERNAME}" ] && [ -n "${TRIVY_REGISTRY_PASSWORD}" ]; then
         auth_args=(--username "${TRIVY_REGISTRY_USERNAME}" --password "${TRIVY_REGISTRY_PASSWORD}")
+    fi
+
+    if [ -n "${IMAGE_INPUT}" ]; then
+        if [ ! -f "${IMAGE_INPUT}" ]; then
+            log_result "Trivy-Image" "FAILED" "IMAGE_INPUT file not found: ${IMAGE_INPUT}"
+            return
+        fi
+        source_args=(--input "${IMAGE_INPUT}")
+    else
+        source_args=("${IMAGE_REF}")
     fi
 
     run_as_scanner trivy image \
@@ -1505,10 +1517,10 @@ run_trivy_image() {
         --timeout "${TRIVY_TIMEOUT}" \
         --severity CRITICAL,HIGH,MEDIUM,LOW \
         "${auth_args[@]}" \
-        "${IMAGE_REF}" 2>&1 || trivy_json_exit=$?
+        "${source_args[@]}" 2>&1 || trivy_json_exit=$?
 
     if ! ensure_valid_json_report "${output_file}"; then
-        log_result "Trivy-Image" "FAILED" "Execution failed before report conversion for ${IMAGE_REF} (json=${trivy_json_exit})"
+        log_result "Trivy-Image" "FAILED" "Execution failed before report conversion (json=${trivy_json_exit})"
         return
     fi
 
@@ -1524,10 +1536,17 @@ run_trivy_image() {
     medium=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' "${output_file}" 2>/dev/null || echo 0)
     low=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' "${output_file}" 2>/dev/null || echo 0)
 
-    if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
-        log_result "Trivy-Image" "FAILED" "Image: ${IMAGE_REF}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
+    local source_label
+    if [ -n "${IMAGE_INPUT}" ]; then
+        source_label="Image input: ${IMAGE_INPUT}"
     else
-        log_result "Trivy-Image" "PASSED" "Image: ${IMAGE_REF}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
+        source_label="Image: ${IMAGE_REF}"
+    fi
+
+    if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
+        log_result "Trivy-Image" "FAILED" "${source_label}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
+    else
+        log_result "Trivy-Image" "PASSED" "${source_label}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
     fi
 }
 

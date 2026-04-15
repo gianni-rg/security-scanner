@@ -18,6 +18,7 @@ param(
     [switch]$AllowRootFallback,
     [switch]$Pull,
     [string]$VolumeName = 'security-scanner-trivy-cache',
+    [switch]$AllowLocalhostImageFromDaemon,
     [switch]$ShowResolvedCommand,
     [Alias('h')]
     [switch]$Help
@@ -39,6 +40,7 @@ USAGE
     ./$scriptName [-ScanPath <path>] [-OutputPath <path>] [-ConfigPath <file>] [-Command <name>] [-Runtime auto|podman|docker]
                 [-Image <ref>] [-ImageRef <ref>] [-SkipDirs <csv>] [-FailOnSeverity <csv>]
                 [-TrivyTimeout <duration>] [-AllowRootFallback] [-Pull] [-VolumeName <name>]
+                [-AllowLocalhostImageFromDaemon]
                 [-ShowResolvedCommand] [-Help]
 
     Optional registry auth for private images:
@@ -59,6 +61,7 @@ NOTES
   The source directory is mounted read-only.
   Reports are written outside the scanned tree by default.
   Root fallback is disabled unless explicitly enabled.
+    Localhost image scanning from the host daemon is disabled by default and requires -AllowLocalhostImageFromDaemon.
 "@
 }
 
@@ -221,6 +224,15 @@ if ($Command -eq 'trivy-image' -and [string]::IsNullOrWhiteSpace($ImageRef)) {
     throw 'ImageRef is required when Command is trivy-image.'
 }
 
+$isLocalhostImageRef = ($Command -eq 'trivy-image' -and -not [string]::IsNullOrWhiteSpace($ImageRef) -and $ImageRef -match '^(?i)localhost/')
+if ($isLocalhostImageRef -and -not $AllowLocalhostImageFromDaemon) {
+    throw 'ImageRef uses localhost/. To scan host-daemon localhost images, explicitly set -AllowLocalhostImageFromDaemon.'
+}
+
+if ($AllowLocalhostImageFromDaemon -and -not $isLocalhostImageRef) {
+    throw '-AllowLocalhostImageFromDaemon is only valid when Command is trivy-image and ImageRef starts with localhost/.'
+}
+
 if ($PSBoundParameters.ContainsKey('ShowResolvedCommand') -and -not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
     Write-Warning 'ShowResolvedCommand may expose TRIVY_REGISTRY_PASSWORD in terminal output.'
 }
@@ -246,6 +258,8 @@ $outputMount = "type=bind,src=$(Convert-ToMountPath -Path $resolvedOutputPath),d
 $cacheMount = "type=volume,src=$VolumeName,dst=/var/lib/trivy"
 $configMount = $null
 $allowRootFallbackValue = if ($AllowRootFallback) { 'true' } else { 'false' }
+$localImageMount = $null
+$localImageArchiveHostPath = $null
 
 $runArguments = @(
     'run',
@@ -268,6 +282,27 @@ if ($null -ne $resolvedConfigPath) {
 }
 else {
     $runArguments += @('--env', 'CONFIG_FILE=/app/config.yml')
+}
+
+if ($isLocalhostImageRef) {
+    $localImageArchiveHostPath = Join-Path -Path $resolvedOutputPath -ChildPath 'localhost-image-input.tar'
+    if (Test-Path -LiteralPath $localImageArchiveHostPath) {
+        Remove-Item -LiteralPath $localImageArchiveHostPath -Force
+    }
+
+    if ($resolvedRuntime -like 'podman*') {
+        & $resolvedRuntime image save --format docker-archive --output $localImageArchiveHostPath $ImageRef
+    }
+    else {
+        & $resolvedRuntime image save --output $localImageArchiveHostPath $ImageRef
+    }
+
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $localImageArchiveHostPath -PathType Leaf)) {
+        throw "Failed to export localhost image from daemon: $ImageRef"
+    }
+
+    $localImageMount = "type=bind,src=$(Convert-ToMountPath -Path $localImageArchiveHostPath),dst=/run/scanner/localhost-image-input.tar,readonly"
+    $runArguments += @('--mount', $localImageMount, '--env', 'IMAGE_INPUT=/run/scanner/localhost-image-input.tar')
 }
 
 if ($AllowRootFallback) {
@@ -319,6 +354,10 @@ Write-Host ("  OutputPath: {0}" -f $resolvedOutputPath)
 Write-Host ("  ConfigPath: {0}" -f $(if ($null -ne $resolvedConfigPath) { $resolvedConfigPath } else { '/app/config.yml (image default)' }))
 Write-Host ("  CacheVolume: {0}" -f $VolumeName)
 Write-Host ("  AllowRootFallback: {0}" -f $allowRootFallbackValue)
+Write-Host ("  AllowLocalhostImageFromDaemon: {0}" -f $(if ($AllowLocalhostImageFromDaemon) { 'true' } else { 'false' }))
+if ($isLocalhostImageRef) {
+    Write-Host ("  LocalhostImageArchive: {0}" -f $localImageArchiveHostPath)
+}
 
 if ($ShowResolvedCommand) {
     Write-Host 'Resolved command'

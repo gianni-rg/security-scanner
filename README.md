@@ -51,6 +51,7 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 ./run-security-scanner.ps1 -ScanPath . -Command all
 ./run-security-scanner.ps1 -ScanPath . -Command gitleaks
 ./run-security-scanner.ps1 -Command trivy-image -ImageRef ghcr.io/org/app:tag
+./run-security-scanner.ps1 -Command trivy-image -ImageRef localhost/security-scanner:latest -AllowLocalhostImageFromDaemon
 
 # Private registry image scan (example: ACR)
 $env:TRIVY_REGISTRY_USERNAME = "<registry-username>"
@@ -64,6 +65,7 @@ $env:TRIVY_REGISTRY_PASSWORD = "<registry-password-or-token>"
 ./run-security-scanner.sh --scan-path . --command all
 ./run-security-scanner.sh --scan-path . --command gitleaks
 ./run-security-scanner.sh --command trivy-image --image-ref ghcr.io/org/app:tag
+./run-security-scanner.sh --command trivy-image --image-ref localhost/security-scanner:latest --allow-localhost-image-from-daemon
 
 # Private registry image scan (example: ACR)
 export TRIVY_REGISTRY_USERNAME="<registry-username>"
@@ -92,6 +94,7 @@ export TRIVY_REGISTRY_PASSWORD="<registry-password-or-token>"
 | `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
 | `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
 | `-ImageRef` / `--image-ref` | Image reference to scan when the command is `trivy-image`. |
+| `-AllowLocalhostImageFromDaemon` / `--allow-localhost-image-from-daemon` | Opt in to scanning `localhost/...` images by exporting from the host daemon to a temporary archive mounted read-only into the scanner container. Disabled by default. |
 | `TRIVY_REGISTRY_USERNAME` / `TRIVY_REGISTRY_PASSWORD` (env) | Optional credentials for private registries when using `trivy-image`. Set both or neither. |
 | `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. These exclusions are applied to Semgrep, Trivy, Syft, and in-container file discovery. |
 | `-FailOnSeverity` / `--fail-on-severity` | Optional comma-separated override for `FAIL_ON_SEVERITY`. |

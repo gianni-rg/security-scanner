@@ -19,6 +19,7 @@ USAGE
     ./$script_name [--scan-path <path>] [--output-path <path>] [--config-path <file>] [--command <name>] [--runtime auto|podman|docker]
                  [--image <ref>] [--image-ref <ref>] [--skip-dirs <csv>] [--fail-on-severity <csv>]
                  [--trivy-timeout <duration>] [--allow-root-fallback] [--pull] [--volume-name <name>]
+                 [--allow-localhost-image-from-daemon]
                  [--show-resolved-command] [--help]
 
     Optional registry auth for private images:
@@ -39,6 +40,7 @@ NOTES
   The source directory is mounted read-only.
   Reports are written outside the scanned tree by default.
   Root fallback is disabled unless explicitly enabled.
+    Localhost image scanning from the host daemon is disabled by default and requires --allow-localhost-image-from-daemon.
 EOF
 }
 
@@ -233,6 +235,7 @@ allow_root_fallback='false'
 pull='false'
 volume_name='security-scanner-trivy-cache'
 show_resolved_command='false'
+allow_localhost_image_from_daemon='false'
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -303,6 +306,10 @@ while [[ $# -gt 0 ]]; do
             show_resolved_command='true'
             shift
             ;;
+        --allow-localhost-image-from-daemon)
+            allow_localhost_image_from_daemon='true'
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -349,6 +356,19 @@ if [[ "$command_name" == 'trivy-image' && -z "$image_ref" ]]; then
     die 'Image reference is required when --command trivy-image is used.'
 fi
 
+is_localhost_image_ref='false'
+if [[ "$command_name" == 'trivy-image' && "$image_ref" =~ ^[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]/ ]]; then
+    is_localhost_image_ref='true'
+fi
+
+if [[ "$is_localhost_image_ref" == 'true' && "$allow_localhost_image_from_daemon" != 'true' ]]; then
+    die 'Image reference uses localhost/. To scan host-daemon localhost images, explicitly set --allow-localhost-image-from-daemon.'
+fi
+
+if [[ "$allow_localhost_image_from_daemon" == 'true' && "$is_localhost_image_ref" != 'true' ]]; then
+    die '--allow-localhost-image-from-daemon is only valid when --command trivy-image and --image-ref starts with localhost/.'
+fi
+
 if [[ -n "${TRIVY_REGISTRY_USERNAME:-}" && -z "${TRIVY_REGISTRY_PASSWORD:-}" ]] || [[ -z "${TRIVY_REGISTRY_USERNAME:-}" && -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
     die 'Set both TRIVY_REGISTRY_USERNAME and TRIVY_REGISTRY_PASSWORD (or neither).'
 fi
@@ -379,6 +399,8 @@ output_mount="type=bind,src=$runtime_output_path,dst=/output"
 cache_mount="type=volume,src=$volume_name,dst=/var/lib/trivy"
 scan_mount="type=bind,src=$runtime_scan_path,dst=/workspace,readonly"
 config_mount=''
+local_image_archive_host_path=''
+local_image_mount=''
 
 run_args=(
     run
@@ -400,6 +422,22 @@ if [[ -n "$resolved_config_path" ]]; then
     run_args+=(--mount "$config_mount" --env CONFIG_FILE=/run/scanner/config.yml)
 else
     run_args+=(--env CONFIG_FILE=/app/config.yml)
+fi
+
+if [[ "$is_localhost_image_ref" == 'true' ]]; then
+    local_image_archive_host_path="$resolved_output_path/localhost-image-input.tar"
+    rm -f "$local_image_archive_host_path"
+
+    if [[ "$resolved_runtime" == podman* ]]; then
+        "$resolved_runtime" image save --format docker-archive --output "$local_image_archive_host_path" "$image_ref"
+    else
+        "$resolved_runtime" image save --output "$local_image_archive_host_path" "$image_ref"
+    fi
+
+    [[ -f "$local_image_archive_host_path" ]] || die "Failed to export localhost image from daemon: $image_ref"
+    runtime_local_image_archive_path=$(to_runtime_mount_path "$resolved_runtime" "$local_image_archive_host_path")
+    local_image_mount="type=bind,src=$runtime_local_image_archive_path,dst=/run/scanner/localhost-image-input.tar,readonly"
+    run_args+=(--mount "$local_image_mount" --env IMAGE_INPUT=/run/scanner/localhost-image-input.tar)
 fi
 
 if [[ "$allow_root_fallback" == 'true' ]]; then
@@ -454,6 +492,10 @@ else
 fi
 printf '  CacheVolume: %s\n' "$volume_name"
 printf '  AllowRootFallback: %s\n' "$allow_root_fallback"
+printf '  AllowLocalhostImageFromDaemon: %s\n' "$allow_localhost_image_from_daemon"
+if [[ "$is_localhost_image_ref" == 'true' ]]; then
+    printf '  LocalhostImageArchive: %s\n' "$local_image_archive_host_path"
+fi
 
 if [[ "$show_resolved_command" == 'true' ]]; then
     printf 'Resolved command\n'
