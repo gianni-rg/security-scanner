@@ -51,6 +51,12 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 ./run-security-scanner.ps1 -ScanPath . -Command all
 ./run-security-scanner.ps1 -ScanPath . -Command gitleaks
 ./run-security-scanner.ps1 -Command trivy-image -ImageRef ghcr.io/org/app:tag
+./run-security-scanner.ps1 -Command trivy-image -ImageRef localhost/security-scanner:latest -AllowLocalhostImageFromDaemon
+
+# Private registry image scan (example: ACR)
+$env:TRIVY_REGISTRY_USERNAME = "<registry-username>"
+$env:TRIVY_REGISTRY_PASSWORD = "<registry-password-or-token>"
+./run-security-scanner.ps1 -Command trivy-image -ImageRef katacr.azurecr.io/frontend-base:v0.2.1
 ```
 
 ### Bash
@@ -59,6 +65,12 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 ./run-security-scanner.sh --scan-path . --command all
 ./run-security-scanner.sh --scan-path . --command gitleaks
 ./run-security-scanner.sh --command trivy-image --image-ref ghcr.io/org/app:tag
+./run-security-scanner.sh --command trivy-image --image-ref localhost/security-scanner:latest --allow-localhost-image-from-daemon
+
+# Private registry image scan (example: ACR)
+export TRIVY_REGISTRY_USERNAME="<registry-username>"
+export TRIVY_REGISTRY_PASSWORD="<registry-password-or-token>"
+./run-security-scanner.sh --command trivy-image --image-ref katacr.azurecr.io/frontend-base:v0.2.1
 ```
 
 ### Override The Image
@@ -82,6 +94,8 @@ If you publish the image to a registry, pass that image reference with `-Image` 
 | `-Runtime` / `--runtime` | Runtime to use: `auto`, `podman`, or `docker`. Defaults to `auto`. |
 | `-Image` / `--image` | Scanner image reference. Defaults to `localhost/security-scanner:latest`. |
 | `-ImageRef` / `--image-ref` | Image reference to scan when the command is `trivy-image`. |
+| `-AllowLocalhostImageFromDaemon` / `--allow-localhost-image-from-daemon` | Opt in to scanning `localhost/...` images by exporting from the host daemon to a temporary archive mounted read-only into the scanner container. Disabled by default. |
+| `TRIVY_REGISTRY_USERNAME` / `TRIVY_REGISTRY_PASSWORD` (env) | Optional credentials for private registries when using `trivy-image`. Set both or neither. |
 | `-SkipDirs` / `--skip-dirs` | Optional comma-separated override for `SKIP_DIRS`. These exclusions are applied to Semgrep, Trivy, Syft, and in-container file discovery. |
 | `-FailOnSeverity` / `--fail-on-severity` | Optional comma-separated override for `FAIL_ON_SEVERITY`. |
 | `-TrivyTimeout` / `--trivy-timeout` | Optional override for the Trivy timeout. |
@@ -192,6 +206,8 @@ You can also point either wrapper at a config file outside this repository with 
 | `SKIP_DIRS` | `node_modules,vendor,...` | Directories to exclude from Semgrep, Trivy, Syft, and entrypoint file discovery. Use `./path` to anchor a rule at the repo root; patterns without `./` are treated as basename or suffix matches. For direct Syft compatibility, prefer patterns starting with `./`, `*/`, or `**/`. |
 | `FAIL_ON_SEVERITY` | `CRITICAL,HIGH` | Severity levels that cause failure |
 | `TRIVY_TIMEOUT` | `30m` | Timeout passed to each Trivy filesystem scan |
+| `TRIVY_REGISTRY_USERNAME` | empty | Optional private registry username for `trivy-image` |
+| `TRIVY_REGISTRY_PASSWORD` | empty | Optional private registry password or token for `trivy-image` |
 | `ALLOW_ROOT_FALLBACK` | `false` | Explicitly allow root execution if the runtime cannot drop privileges |
 | `FORBIDDEN_LICENSES` | `GPL-3.0,AGPL-3.0` | License identifiers that fail the scan |
 | `HADOLINT_FAIL_ON` | `error` | Hadolint levels that fail the scan |

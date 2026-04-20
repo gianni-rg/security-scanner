@@ -92,6 +92,17 @@ trivy:
       - GPL-3.0
       - AGPL-3.0
 
+  image:
+    # Image scanning is opt-in (run via --command trivy-image --image-ref <ref>)
+    # It is not included in the "all" command unless IMAGE_REF is set.
+    enabled: true
+    # Maximum allowed vulnerabilities before failing
+    max_critical: 0
+    max_high: 0
+    # -1 means unlimited
+    max_medium: -1
+    max_low: -1
+
 # Syft Configuration
 syft:
   enabled: true
