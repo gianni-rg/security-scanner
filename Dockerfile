@@ -1,4 +1,6 @@
-FROM python:3.12-slim AS builder
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-trixie
+
+FROM ${PYTHON_BASE_IMAGE} AS builder
 
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
@@ -89,7 +91,7 @@ RUN echo "Installing jq ${JQ_VERSION}..." \
 RUN rm -f /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.12 \
     && find /opt/venv/lib -type d \( -name 'pip' -o -name 'pip-*.dist-info' \) -prune -exec rm -rf {} +
 
-FROM python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ARG CA_CERTIFICATES_APT_VERSION=20250419
 ARG OPENSSL_APT_VERSION=3.5.5-1~deb13u2

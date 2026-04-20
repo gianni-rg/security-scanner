@@ -101,6 +101,25 @@ csv_contains() {
     return 1
 }
 
+is_boolean_true() {
+    case "${1,,}" in
+        true|1|yes|on)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_integer() {
+    [[ "$1" =~ ^-?[0-9]+$ ]]
+}
+
+is_threshold_value() {
+    local value=$1
+    is_integer "$value" || return 1
+    [ "$value" -ge -1 ]
+}
+
 build_skip_args() {
     local flag=$1
     local array_name=$2
@@ -785,11 +804,38 @@ yamllint_severity_fails() {
     return 1
 }
 
+trivy_image_threshold_fails() {
+    local critical=$1
+    local high=$2
+    local medium=$3
+    local low=$4
+
+    if [ "$TRIVY_IMAGE_MAX_CRITICAL" -ge 0 ] && [ "$critical" -gt "$TRIVY_IMAGE_MAX_CRITICAL" ]; then
+        return 0
+    fi
+    if [ "$TRIVY_IMAGE_MAX_HIGH" -ge 0 ] && [ "$high" -gt "$TRIVY_IMAGE_MAX_HIGH" ]; then
+        return 0
+    fi
+    if [ "$TRIVY_IMAGE_MAX_MEDIUM" -ge 0 ] && [ "$medium" -gt "$TRIVY_IMAGE_MAX_MEDIUM" ]; then
+        return 0
+    fi
+    if [ "$TRIVY_IMAGE_MAX_LOW" -ge 0 ] && [ "$low" -gt "$TRIVY_IMAGE_MAX_LOW" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
 DEFAULT_SKIP_DIRS="$(get_config_value general.skip_dirs)"
 DEFAULT_SEMGREP_RULESETS="$(get_config_value semgrep.rulesets)"
 DEFAULT_FAIL_THRESHOLD="$(get_config_value semgrep.fail_on_severity)"
 DEFAULT_FORBIDDEN_LICENSES="$(get_config_value trivy.license.forbidden_licenses)"
 DEFAULT_TRIVY_TIMEOUT="$(get_config_value trivy.timeout)"
+DEFAULT_TRIVY_IMAGE_ENABLED="$(get_config_value trivy.image.enabled)"
+DEFAULT_TRIVY_IMAGE_MAX_CRITICAL="$(get_config_value trivy.image.max_critical)"
+DEFAULT_TRIVY_IMAGE_MAX_HIGH="$(get_config_value trivy.image.max_high)"
+DEFAULT_TRIVY_IMAGE_MAX_MEDIUM="$(get_config_value trivy.image.max_medium)"
+DEFAULT_TRIVY_IMAGE_MAX_LOW="$(get_config_value trivy.image.max_low)"
 DEFAULT_HADOLINT_FAIL_ON="$(get_config_value hadolint.fail_on)"
 DEFAULT_HADOLINT_IGNORED_RULES="$(get_config_value hadolint.ignored_rules)"
 DEFAULT_SHELLCHECK_SEVERITY="$(get_config_value shellcheck.severity)"
@@ -800,6 +846,11 @@ FAIL_ON_SEVERITY="${FAIL_ON_SEVERITY:-$(threshold_to_fail_list "${DEFAULT_FAIL_T
 SEMGREP_RULESETS="${SEMGREP_RULESETS:-${DEFAULT_SEMGREP_RULESETS:-auto,p/security-audit,p/secrets}}"
 FORBIDDEN_LICENSES="${FORBIDDEN_LICENSES:-${DEFAULT_FORBIDDEN_LICENSES:-GPL-3.0,AGPL-3.0}}"
 TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-${DEFAULT_TRIVY_TIMEOUT:-30m}}"
+TRIVY_IMAGE_ENABLED="${TRIVY_IMAGE_ENABLED:-${DEFAULT_TRIVY_IMAGE_ENABLED:-true}}"
+TRIVY_IMAGE_MAX_CRITICAL="${TRIVY_IMAGE_MAX_CRITICAL:-${DEFAULT_TRIVY_IMAGE_MAX_CRITICAL:-0}}"
+TRIVY_IMAGE_MAX_HIGH="${TRIVY_IMAGE_MAX_HIGH:-${DEFAULT_TRIVY_IMAGE_MAX_HIGH:-0}}"
+TRIVY_IMAGE_MAX_MEDIUM="${TRIVY_IMAGE_MAX_MEDIUM:-${DEFAULT_TRIVY_IMAGE_MAX_MEDIUM:--1}}"
+TRIVY_IMAGE_MAX_LOW="${TRIVY_IMAGE_MAX_LOW:-${DEFAULT_TRIVY_IMAGE_MAX_LOW:--1}}"
 HADOLINT_FAIL_ON="${HADOLINT_FAIL_ON:-${DEFAULT_HADOLINT_FAIL_ON:-error}}"
 HADOLINT_IGNORED_RULES="${HADOLINT_IGNORED_RULES:-${DEFAULT_HADOLINT_IGNORED_RULES:-}}"
 SHELLCHECK_SEVERITY="${SHELLCHECK_SEVERITY:-${DEFAULT_SHELLCHECK_SEVERITY:-warning}}"
@@ -810,6 +861,23 @@ IMAGE_INPUT="${IMAGE_INPUT:-}"
 TRIVY_REGISTRY_USERNAME="${TRIVY_REGISTRY_USERNAME:-}"
 TRIVY_REGISTRY_PASSWORD="${TRIVY_REGISTRY_PASSWORD:-}"
 ALLOW_ROOT_FALLBACK="${ALLOW_ROOT_FALLBACK:-false}"
+
+if ! is_threshold_value "$TRIVY_IMAGE_MAX_CRITICAL"; then
+    echo "Invalid TRIVY_IMAGE_MAX_CRITICAL value: ${TRIVY_IMAGE_MAX_CRITICAL}. Expected integer >= -1." >&2
+    exit 2
+fi
+if ! is_threshold_value "$TRIVY_IMAGE_MAX_HIGH"; then
+    echo "Invalid TRIVY_IMAGE_MAX_HIGH value: ${TRIVY_IMAGE_MAX_HIGH}. Expected integer >= -1." >&2
+    exit 2
+fi
+if ! is_threshold_value "$TRIVY_IMAGE_MAX_MEDIUM"; then
+    echo "Invalid TRIVY_IMAGE_MAX_MEDIUM value: ${TRIVY_IMAGE_MAX_MEDIUM}. Expected integer >= -1." >&2
+    exit 2
+fi
+if ! is_threshold_value "$TRIVY_IMAGE_MAX_LOW"; then
+    echo "Invalid TRIVY_IMAGE_MAX_LOW value: ${TRIVY_IMAGE_MAX_LOW}. Expected integer >= -1." >&2
+    exit 2
+fi
 
 # shellcheck disable=SC2034
 declare -a SKIP_DIR_ARRAY FAIL_ON_SEVERITY_ARRAY SEMGREP_RULESET_ARRAY FORBIDDEN_LICENSE_ARRAY HADOLINT_FAIL_ON_ARRAY HADOLINT_IGNORED_RULES_ARRAY YAMLLINT_FAIL_ON_ARRAY
@@ -1489,16 +1557,16 @@ run_trivy_image() {
     local sarif_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.sarif"
     local table_file="${OUTPUT_DIR}/trivy-image_${TIMESTAMP}.txt"
     local trivy_json_exit=0
-    local -a auth_args=()
     local -a source_args=()
+
+    if ! is_boolean_true "${TRIVY_IMAGE_ENABLED}"; then
+        log_result "Trivy-Image" "SKIPPED" "trivy.image.enabled is false"
+        return
+    fi
 
     if [ -z "${IMAGE_REF}" ] && [ -z "${IMAGE_INPUT}" ]; then
         log_result "Trivy-Image" "SKIPPED" "IMAGE_REF and IMAGE_INPUT are both unset"
         return
-    fi
-
-    if [ -n "${TRIVY_REGISTRY_USERNAME}" ] && [ -n "${TRIVY_REGISTRY_PASSWORD}" ]; then
-        auth_args=(--username "${TRIVY_REGISTRY_USERNAME}" --password "${TRIVY_REGISTRY_PASSWORD}")
     fi
 
     if [ -n "${IMAGE_INPUT}" ]; then
@@ -1511,13 +1579,23 @@ run_trivy_image() {
         source_args=("${IMAGE_REF}")
     fi
 
-    run_as_scanner trivy image \
-        --format json \
-        --output "${output_file}" \
-        --timeout "${TRIVY_TIMEOUT}" \
-        --severity CRITICAL,HIGH,MEDIUM,LOW \
-        "${auth_args[@]}" \
-        "${source_args[@]}" 2>&1 || trivy_json_exit=$?
+    if [ -n "${TRIVY_REGISTRY_USERNAME}" ] && [ -n "${TRIVY_REGISTRY_PASSWORD}" ]; then
+        run_as_scanner \
+            env TRIVY_USERNAME="${TRIVY_REGISTRY_USERNAME}" TRIVY_PASSWORD="${TRIVY_REGISTRY_PASSWORD}" \
+            trivy image \
+            --format json \
+            --output "${output_file}" \
+            --timeout "${TRIVY_TIMEOUT}" \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            "${source_args[@]}" 2>&1 || trivy_json_exit=$?
+    else
+        run_as_scanner trivy image \
+            --format json \
+            --output "${output_file}" \
+            --timeout "${TRIVY_TIMEOUT}" \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            "${source_args[@]}" 2>&1 || trivy_json_exit=$?
+    fi
 
     if ! ensure_valid_json_report "${output_file}"; then
         log_result "Trivy-Image" "FAILED" "Execution failed before report conversion (json=${trivy_json_exit})"
@@ -1543,7 +1621,7 @@ run_trivy_image() {
         source_label="Image: ${IMAGE_REF}"
     fi
 
-    if trivy_severity_fails "$critical" "$high" "$medium" "$low"; then
+    if trivy_image_threshold_fails "$critical" "$high" "$medium" "$low"; then
         log_result "Trivy-Image" "FAILED" "${source_label}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"
     else
         log_result "Trivy-Image" "PASSED" "${source_label}, Critical: ${critical}, High: ${high}, Medium: ${medium}, Low: ${low}"

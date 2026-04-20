@@ -401,6 +401,15 @@ scan_mount="type=bind,src=$runtime_scan_path,dst=/workspace,readonly"
 config_mount=''
 local_image_archive_host_path=''
 local_image_mount=''
+cleanup_local_image_archive='false'
+
+cleanup_local_image_archive_file() {
+    if [[ "$cleanup_local_image_archive" == 'true' && -n "$local_image_archive_host_path" ]]; then
+        rm -f "$local_image_archive_host_path" || true
+    fi
+}
+
+trap cleanup_local_image_archive_file EXIT
 
 run_args=(
     run
@@ -426,16 +435,21 @@ fi
 
 if [[ "$is_localhost_image_ref" == 'true' ]]; then
     local_image_archive_host_path="$resolved_output_path/localhost-image-input.tar"
+    runtime_local_image_archive_path=$(to_runtime_mount_path "$resolved_runtime" "$local_image_archive_host_path")
     rm -f "$local_image_archive_host_path"
+    cleanup_local_image_archive='true'
 
     if [[ "$resolved_runtime" == podman* ]]; then
-        "$resolved_runtime" image save --format docker-archive --output "$local_image_archive_host_path" "$image_ref"
+        if ! "$resolved_runtime" image save --format docker-archive --output "$runtime_local_image_archive_path" "$image_ref"; then
+            die "Failed to export localhost image from daemon: $image_ref"
+        fi
     else
-        "$resolved_runtime" image save --output "$local_image_archive_host_path" "$image_ref"
+        if ! "$resolved_runtime" image save --output "$runtime_local_image_archive_path" "$image_ref"; then
+            die "Failed to export localhost image from daemon: $image_ref"
+        fi
     fi
 
     [[ -f "$local_image_archive_host_path" ]] || die "Failed to export localhost image from daemon: $image_ref"
-    runtime_local_image_archive_path=$(to_runtime_mount_path "$resolved_runtime" "$local_image_archive_host_path")
     local_image_mount="type=bind,src=$runtime_local_image_archive_path,dst=/run/scanner/localhost-image-input.tar,readonly"
     run_args+=(--mount "$local_image_mount" --env IMAGE_INPUT=/run/scanner/localhost-image-input.tar)
 fi
@@ -464,12 +478,14 @@ if [[ -n "$image_ref" ]]; then
     run_args+=(--env "IMAGE_REF=$image_ref")
 fi
 
-if [[ -n "${TRIVY_REGISTRY_USERNAME:-}" ]]; then
-    run_args+=(--env "TRIVY_REGISTRY_USERNAME=$TRIVY_REGISTRY_USERNAME")
-fi
+if [[ "$command_name" == 'trivy-image' ]]; then
+    if [[ -n "${TRIVY_REGISTRY_USERNAME:-}" ]]; then
+        run_args+=(--env "TRIVY_REGISTRY_USERNAME=$TRIVY_REGISTRY_USERNAME")
+    fi
 
-if [[ -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
-    run_args+=(--env "TRIVY_REGISTRY_PASSWORD=$TRIVY_REGISTRY_PASSWORD")
+    if [[ -n "${TRIVY_REGISTRY_PASSWORD:-}" ]]; then
+        run_args+=(--env "TRIVY_REGISTRY_PASSWORD=$TRIVY_REGISTRY_PASSWORD")
+    fi
 fi
 
 run_args+=("$image" "$command_name")

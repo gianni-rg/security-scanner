@@ -233,7 +233,7 @@ if ($AllowLocalhostImageFromDaemon -and -not $isLocalhostImageRef) {
     throw '-AllowLocalhostImageFromDaemon is only valid when Command is trivy-image and ImageRef starts with localhost/.'
 }
 
-if ($PSBoundParameters.ContainsKey('ShowResolvedCommand') -and -not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
+if ($ShowResolvedCommand -and -not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
     Write-Warning 'ShowResolvedCommand may expose TRIVY_REGISTRY_PASSWORD in terminal output.'
 }
 
@@ -298,6 +298,9 @@ if ($isLocalhostImageRef) {
     }
 
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $localImageArchiveHostPath -PathType Leaf)) {
+        if (Test-Path -LiteralPath $localImageArchiveHostPath) {
+            Remove-Item -LiteralPath $localImageArchiveHostPath -Force -ErrorAction SilentlyContinue
+        }
         throw "Failed to export localhost image from daemon: $ImageRef"
     }
 
@@ -329,12 +332,14 @@ if (-not [string]::IsNullOrWhiteSpace($ImageRef)) {
     $runArguments += @('--env', "IMAGE_REF=$ImageRef")
 }
 
-if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_USERNAME)) {
-    $runArguments += @('--env', "TRIVY_REGISTRY_USERNAME=$($env:TRIVY_REGISTRY_USERNAME)")
-}
+if ($Command -eq 'trivy-image') {
+    if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_USERNAME)) {
+        $runArguments += @('--env', "TRIVY_REGISTRY_USERNAME=$($env:TRIVY_REGISTRY_USERNAME)")
+    }
 
-if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
-    $runArguments += @('--env', "TRIVY_REGISTRY_PASSWORD=$($env:TRIVY_REGISTRY_PASSWORD)")
+    if (-not [string]::IsNullOrWhiteSpace($env:TRIVY_REGISTRY_PASSWORD)) {
+        $runArguments += @('--env', "TRIVY_REGISTRY_PASSWORD=$($env:TRIVY_REGISTRY_PASSWORD)")
+    }
 }
 
 $runArguments += @($Image, $Command)
@@ -365,8 +370,15 @@ if ($ShowResolvedCommand) {
     Write-Host (Format-ResolvedCommand -Arguments $resolvedCommand)
 }
 
-& $resolvedRuntime @runArguments
-$exitCode = $LASTEXITCODE
-if ($exitCode -ne 0) {
-    exit $exitCode
+try {
+    & $resolvedRuntime @runArguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        exit $exitCode
+    }
+}
+finally {
+    if ($null -ne $localImageArchiveHostPath -and (Test-Path -LiteralPath $localImageArchiveHostPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $localImageArchiveHostPath -Force -ErrorAction SilentlyContinue
+    }
 }
