@@ -230,3 +230,4 @@ __marimo__/
 
 # Output directories
 **/output/
+.vscode/settings.json
